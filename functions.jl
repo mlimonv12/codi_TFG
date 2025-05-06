@@ -77,19 +77,19 @@ end
 
 
 # Generates a vector of Suzuki-Trotter gates for a Hubbard Hamiltonian
-function gen_gates(N::Int64, sites::Vector{Index{Int64}}, dtau::Float64; secondorder = True)
+function gen_gates(N::Int64, sites::Vector{Index{Int64}}, dtau::Float64; secondorder = true)
 
-    odd_gates = []
-    even_gates = []
-    #gates = [ITensor() for _ in 1:N] # Define gates as an empty Vector{ITensor}
-    gates = []
-
+    gates = [ITensor() for _ in 1:N] # Define gates as an empty Vector{ITensor}
+    
     for i in 1:N
 
         # Periodic boundary conditions
         iplusone = mod1(i+1, N)
 
-        h = get_operator("Hubbard", sites, i)
+        # h = get_operator("TunnellingUP", sites, i)
+        h = op("Cup", sites[i]) * op("Cdagup", sites[mod1(i+1, N)])
+        #h += op("Cdagup", sites[i]) * op("Cup", sites[mod1(i+1, N)])
+        h *= -1
 
         # Second-order ST ordering: dτ is divided by two for odd gates, which will be applied twice
         if secondorder
@@ -101,31 +101,17 @@ function gen_gates(N::Int64, sites::Vector{Index{Int64}}, dtau::Float64; secondo
         else
             gate = exp(-dtau * h)
         end
+        println(inds(gate))
 
-        #if isodd(i)
-        #    push!(odd_gates, gate)
-        #else
-        #    push!(even_gates, gate)
-        #end
-
-        push!(gates, gate)
-
-        # gates are saved in the gates vector in the S-T order, so that a simple iterated application
-        # of gates over the iMPS gives already Suzuki-Trotter ordering
-        #gatepos = ST_index(N, i)
-        #gates[gatepos] = gate
-        
+        push!(gates, gate) 
     end
 
-    #return odd_gates, even_gates
     return gates
 end
 
 
 # Applies a two-site gate to an iMPS of type Vector{ITensor}, and returns the split iMPS sites
-function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-20, maxdim = 100)
-
-    N = length(iMPS)
+function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-20, maxdim = 30)
 
     # Contract the site at pos with the next one, two-site gate
     prodsite = site1 * site2
@@ -143,7 +129,7 @@ function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-2
     prodsite_matrix *= cright
 
     # Perform SVD
-    U, S, V = svd(prodsite_matrix, inds(prodsite_matrix)[1])#; maxdim = maxdim)
+    U, S, V = svd(prodsite_matrix, inds(prodsite_matrix)[1]; maxdim = maxdim)
 
     # diagonal_array = [S[inds(S)[1]=>i, inds(S)[2]=>i] for i in 1:size(S)[1]]
     
@@ -164,8 +150,10 @@ function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-2
     replaceindex!(sqr, inds(sqr)[1], inds(site2)[1])
     
     # Finally form and reshape the new site tensors, of indices D,d,D
-    L = U * sqSl * dag(cleft)
-    R = sqSr * V * dag(cright)
+    L = U * sql * dag(cleft)
+    R = sqr * V * dag(cright)
+
+    #println("cacotacomsiguiaixo: ", inds(L))
 
     # Return updated sites
     return L, R
@@ -173,21 +161,21 @@ end
 
 
 # Applies a Suzuki-Trotter step to an MPS
-function ST_step(iMPS::Vector{ITensor}, gates::Vector{ITensor}; secondorder = True)
+function ST_step(iMPS::Vector{ITensor}, gates::Vector{ITensor}; secondorder = true)
 
     N = length(iMPS)
 
-    # Odd gates
+    # Odd sites
     for i in 1:N
         if isodd(i)
-            iMPS[i], iMPS[mod1(i+1), N] = apply_gate(iMPS[i], iMPS[mod1(i+1), N], gates[i])
+            iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i])
         end
     end
     
-    # Even gates
+    # Even sites
     for i in 1:N
         if iseven(i)
-            iMPS[i], iMPS[mod1(i+1), N] = apply_gate(iMPS[i], iMPS[mod1(i+1), N], gates[i])
+            iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i])
         end
     end
     
@@ -195,7 +183,7 @@ function ST_step(iMPS::Vector{ITensor}, gates::Vector{ITensor}; secondorder = Tr
     if secondorder
         for i in 1:N
             if isodd(i)
-                iMPS[i], iMPS[mod1(i+1), N] = apply_gate(iMPS[i], iMPS[mod1(i+1), N], gates[i])
+                iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i])
             end
         end
     end
@@ -257,7 +245,7 @@ function imps_expect(iMPS::Vector{ITensor}, operator::ITensor, site::Int64)
 
     # Find number of sites the operator acts on
     s = Int64(length(size(operator))/2)
-    print("\n\t> S = ", s, "\n")
+    #print("\n\t> S = ", s, "\n")
 
     N = length(iMPS)
 
