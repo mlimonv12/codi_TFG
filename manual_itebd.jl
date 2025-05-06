@@ -86,17 +86,19 @@ end
 
 
 # Generates a vector of Suzuki-Trotter gates for a Hubbard Hamiltonian
-function gen_gates(N::Int64, sites::Vector{Index{Int64}}, dtau::Float64; secondorder = True)
+function gen_gates(N::Int64, sites::Vector{Index{Int64}}, dtau::Float64; secondorder = true)
 
-    #gates = [ITensor() for _ in 1:N] # Define gates as an empty Vector{ITensor}
-    gates = []
-
+    gates = [ITensor() for _ in 1:N] # Define gates as an empty Vector{ITensor}
+    
     for i in 1:N
 
         # Periodic boundary conditions
         iplusone = mod1(i+1, N)
 
-        h = get_operator("Hubbard", sites, i)
+        # h = get_operator("TunnellingUP", sites, i)
+        h = op("Cup", sites[i]) * op("Cdagup", sites[mod1(i+1, N)])
+        h += op("Cdagup", sites[i]) * op("Cup", sites[mod1(i+1, N)])
+
 
         # Second-order ST ordering: dτ is divided by two for odd gates, which will be applied twice
         if secondorder
@@ -120,19 +122,15 @@ function gen_gates(N::Int64, sites::Vector{Index{Int64}}, dtau::Float64; secondo
         # gates are saved in the gates vector in the S-T order, so that a simple iterated application
         # of gates over the iMPS gives already Suzuki-Trotter ordering
         #gatepos = ST_index(N, i)
-        #gates[gatepos] = gate
-        
+        #gates[gatepos] = gate        
     end
 
-    #return odd_gates, even_gates
     return gates
 end
 
 
 # Applies a two-site gate to an iMPS of type Vector{ITensor}, and returns the split iMPS sites
-function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-20, maxdim = 100)
-
-    N = length(iMPS)
+function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-20, maxdim = 30)
 
     # Contract the site at pos with the next one, two-site gate
     prodsite = site1 * site2
@@ -150,7 +148,7 @@ function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-2
     prodsite_matrix *= cright
 
     # Perform SVD
-    U, S, V = svd(prodsite_matrix, inds(prodsite_matrix)[1])#; maxdim = maxdim)
+    U, S, V = svd(prodsite_matrix, inds(prodsite_matrix)[1]; maxdim = maxdim)
 
     # diagonal_array = [S[inds(S)[1]=>i, inds(S)[2]=>i] for i in 1:size(S)[1]]
     
@@ -171,8 +169,8 @@ function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-2
     replaceindex!(sqr, inds(sqr)[1], inds(site2)[1])
     
     # Finally form and reshape the new site tensors, of indices D,d,D
-    L = U * sqSl * dag(cleft)
-    R = sqSr * V * dag(cright)
+    L = U * sql * dag(cleft)
+    R = sqr * V * dag(cright)
 
     # Return updated sites
     return L, R
@@ -180,7 +178,7 @@ end
 
 
 # Applies a Suzuki-Trotter step to an MPS
-function ST_step(iMPS::Vector{ITensor}, gates::Vector{ITensor}; secondorder = True)
+function ST_step(iMPS::Vector{ITensor}, gates::Vector{ITensor}; secondorder = true)
 
     N = length(iMPS)
 
@@ -264,7 +262,7 @@ function imps_expect(iMPS::Vector{ITensor}, operator::ITensor, site::Int64)
 
     # Find number of sites the operator acts on
     s = Int64(length(size(operator))/2)
-    print("\n\t> S = ", s, "\n")
+    #print("\n\t> S = ", s, "\n")
 
     N = length(iMPS)
 
@@ -335,14 +333,14 @@ end
 let 
     # 
     N = 5
-    bdim = 20
+    bdim = 30
     sites = siteinds("Electron", N)
     links = [Index(bdim, "link-$i") for i in 1:N]
 
     # Create an iMPS with a known initial state
     psi = init_iMPS(N, sites, links)
     print(typeof(sites), "\n")
-    psi = set_FHstate(psi, sites, links, [1, 1, 0, 0, 0])
+    psi = set_FHstate(psi, sites, links, [0, 1, 0, 0, 0])
 
     # Define simulation parameters
     U = 0.0
@@ -351,26 +349,28 @@ let
     # iTEBD parameters, gates and operator
     cutoff = 1e-5
     dtau = 0.01
-    steps = 200
+    steps = 100
 
     mesures = []
 
-    j = 5
+    # Generate iTEBD gates
+    secondorder_STgates = gen_gates(N, sites, dtau)
 
     for step in 1:steps
+
+        println("Step ", step, " of ", steps)
         
         # Evolve the system using iTEBD, second-order Suzuki-Trotter gate ordering:
         # First (square-rooted) odd gates are applied, then even, then odd gates again
         # The functions gen_gates and secondorder_STstep defined in the file "functions.jl"
         # implement this automatically, generating an array in which the gates are well-ordered
-        secondorder_STgates = gen_gates(N, sites, dtau = dtau)
         psi = ST_step(psi, secondorder_STgates)
 
 
         if mod(step, 10) == 0
             
             # Measure density profile
-            density = [Float64 for _ in 1:N]
+            density = zeros(N)
             for pos in 1:N
                 site_density = op("Nup", sites[pos])
                 density[pos] = scalar(imps_expect(psi, site_density, pos))
@@ -386,6 +386,7 @@ let
 
 
 
+    j = 1
     gate1 = op("Ntot", sites[j])
     expect2 = scalar(imps_expect(psi, gate1, j))
     #expect2 = imps_expect(psi, gate1, 2)
