@@ -1,5 +1,5 @@
+##### Miquel Limón Vallés
 # TFG
-#### Miquel Limón Vallés
 
 This repository contains the code written for the final project of my degree in Physics.
 
