@@ -8,5 +8,6 @@ The main goal of this project is to obtain a μ/U phase diagram of the 1D Fermi-
 
 ### Repository basics
 The relevant files included here (ignoring test files) are the following:
-"*functions.jl*": contains a detailed collection of functions, the need for which arises as I get deeper into the project. These functions serve as an interface to work with ITensor-based iMPS comfortably, despite the official ITensor library not offering formal support for iMPS yet. 
-"*manual_itebd.jl*": using the functions mentioned above, I am trying to implement a simple infinite Time Evolving Block Decimation algorithm. My current project is simulating a single Up fermion in a 1D lattice with periodic boundary conditions and seeing that the expected solution is accomplished.
+
+- "*functions.jl*": contains a detailed collection of functions, the need for which arises as I get deeper into the project. These functions serve as an interface to work with ITensor-based iMPS comfortably, despite the official ITensor library not offering formal support for iMPS yet. 
+- "*manual_itebd.jl*": using the functions mentioned above, I am trying to implement a simple infinite Time Evolving Block Decimation algorithm. My current project is simulating a single Up fermion in a 1D lattice with periodic boundary conditions and seeing that the expected solution is accomplished.
