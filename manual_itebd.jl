@@ -97,8 +97,8 @@ function gen_gates(N::Int64, sites::Vector{Index{Int64}}, dtau::Float64; secondo
 
         # h = get_operator("TunnellingUP", sites, i)
         h = op("Cup", sites[i]) * op("Cdagup", sites[mod1(i+1, N)])
-        h += op("Cdagup", sites[i]) * op("Cup", sites[mod1(i+1, N)])
-
+        #h += op("Cdagup", sites[i]) * op("Cup", sites[mod1(i+1, N)])
+        h *= -1
 
         # Second-order ST ordering: dτ is divided by two for odd gates, which will be applied twice
         if secondorder
@@ -110,19 +110,9 @@ function gen_gates(N::Int64, sites::Vector{Index{Int64}}, dtau::Float64; secondo
         else
             gate = exp(-dtau * h)
         end
+        println(inds(gate))
 
-        #if isodd(i)
-        #    push!(odd_gates, gate)
-        #else
-        #    push!(even_gates, gate)
-        #end
-
-        push!(gates, gate)
-
-        # gates are saved in the gates vector in the S-T order, so that a simple iterated application
-        # of gates over the iMPS gives already Suzuki-Trotter ordering
-        #gatepos = ST_index(N, i)
-        #gates[gatepos] = gate        
+        push!(gates, gate) 
     end
 
     return gates
@@ -172,6 +162,8 @@ function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-2
     L = U * sql * dag(cleft)
     R = sqr * V * dag(cright)
 
+    #println("cacotacomsiguiaixo: ", inds(L))
+
     # Return updated sites
     return L, R
 end
@@ -182,14 +174,14 @@ function ST_step(iMPS::Vector{ITensor}, gates::Vector{ITensor}; secondorder = tr
 
     N = length(iMPS)
 
-    # Odd gates
+    # Odd sites
     for i in 1:N
         if isodd(i)
             iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i])
         end
     end
     
-    # Even gates
+    # Even sites
     for i in 1:N
         if iseven(i)
             iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i])
@@ -332,7 +324,7 @@ end
 
 let 
     # 
-    N = 5
+    N = 4
     bdim = 30
     sites = siteinds("Electron", N)
     links = [Index(bdim, "link-$i") for i in 1:N]
@@ -340,7 +332,7 @@ let
     # Create an iMPS with a known initial state
     psi = init_iMPS(N, sites, links)
     print(typeof(sites), "\n")
-    psi = set_FHstate(psi, sites, links, [0, 1, 0, 0, 0])
+    psi = set_FHstate(psi, sites, links, [0, 1, 0, 1])
 
     # Define simulation parameters
     U = 0.0
@@ -349,7 +341,7 @@ let
     # iTEBD parameters, gates and operator
     cutoff = 1e-5
     dtau = 0.01
-    steps = 100
+    steps = 200
 
     mesures = []
 
@@ -367,7 +359,7 @@ let
         psi = ST_step(psi, secondorder_STgates)
 
 
-        if mod(step, 10) == 0
+        if mod(step, 50) == 0
             
             # Measure density profile
             density = zeros(N)
