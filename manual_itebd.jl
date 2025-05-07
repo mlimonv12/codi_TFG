@@ -58,8 +58,8 @@ function set_FHstate(iMPS::Vector{ITensor}, sites::Vector, links::Vector, state:
 
     for i in 1:N
         #print("AAA", typeof(state[i]), "\n")
-        T = ITensor(links[i], sites[i], links[mod1(i+1,N)])
-        T[links[i]=>bdim, sites[i]=>references[state[i]], links[mod1(i+1,N)]=>bdim] = 1.0
+        T = ITensor(links[mod1(i-1, N)], sites[i], links[i])
+        T[links[mod1(i-1, N)]=>bdim, sites[i]=>references[state[i]], links[i]=>bdim] = 1.0
         iMPS[i] = T
         #MPS[i][links(i), sites[i]=>Dict(state[i]), links(mod1(i+1,N))] = 1.0
     end
@@ -97,8 +97,7 @@ function gen_gates(N::Int64, sites::Vector{Index{Int64}}, dtau::Float64; secondo
 
         # h = get_operator("TunnellingUP", sites, i)
         h = op("Cup", sites[i]) * op("Cdagup", sites[mod1(i+1, N)])
-        #h += op("Cdagup", sites[i]) * op("Cup", sites[mod1(i+1, N)])
-        h *= -1
+        h += op("Cdagup", sites[i]) * op("Cup", sites[mod1(i+1, N)])
 
         # Second-order ST ordering: dτ is divided by two for odd gates, which will be applied twice
         if secondorder
@@ -112,7 +111,7 @@ function gen_gates(N::Int64, sites::Vector{Index{Int64}}, dtau::Float64; secondo
         end
         println(inds(gate))
 
-        push!(gates, gate) 
+        gates[i] = gate 
     end
 
     return gates
@@ -128,13 +127,15 @@ function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-2
     # Contract the joint site with the two-site operator
     prodsite_evol = gate * prodsite
 
+    #println("prodsite_inds: ", inds(prodsite_evol))
+
     # Define combiner tensors for left and right sides: this will help switch prodsite_evol
     # from a D,d,d,D indexed tensor to a D*d, D*d tensor, enabling SVD
-    cleft = combiner(inds(prodsite_evol)[1], inds(prodsite_evol)[2])
-    cright = combiner(inds(prodsite_evol)[3], inds(prodsite_evol)[4])
+    cleft = combiner(inds(prodsite_evol)[1], inds(prodsite_evol)[3])
+    cright = combiner(inds(prodsite_evol)[2], inds(prodsite_evol)[4])
 
     # Apply combiners, making prodsite_matrix a D*d, D*d tensor
-    prodsite_matrix = prodsite * cleft
+    prodsite_matrix = prodsite_evol * cleft
     prodsite_matrix *= cright
 
     # Perform SVD
@@ -159,8 +160,15 @@ function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-2
     replaceindex!(sqr, inds(sqr)[1], inds(site2)[1])
     
     # Finally form and reshape the new site tensors, of indices D,d,D
+    #println("inds U: ", inds(U))
+    #println("inds sql: ", inds(sql))
+    #println("inds cleft: ", inds(cleft))
     L = U * sql * dag(cleft)
     R = sqr * V * dag(cright)
+    
+    L = permute(L, inds(L)[2], inds(L)[1], inds(L)[3])
+    #println("inds Lfinal: ", inds(L))
+    #println("inds Rfinal: ", inds(R))
 
     #println("cacotacomsiguiaixo: ", inds(L))
 
@@ -170,21 +178,21 @@ end
 
 
 # Applies a Suzuki-Trotter step to an MPS
-function ST_step(iMPS::Vector{ITensor}, gates::Vector{ITensor}; secondorder = true)
+function ST_step(iMPS::Vector{ITensor}, gates::Vector{ITensor}; secondorder = true, maxdim = 30)
 
     N = length(iMPS)
 
     # Odd sites
     for i in 1:N
         if isodd(i)
-            iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i])
+            iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim)
         end
     end
     
     # Even sites
     for i in 1:N
         if iseven(i)
-            iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i])
+            iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim)
         end
     end
     
@@ -192,7 +200,7 @@ function ST_step(iMPS::Vector{ITensor}, gates::Vector{ITensor}; secondorder = tr
     if secondorder
         for i in 1:N
             if isodd(i)
-                iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i])
+                iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim)
             end
         end
     end
@@ -308,6 +316,59 @@ function imps_expect(iMPS::Vector{ITensor}, operator::ITensor, site::Int64)
 end
 
 
+# Canonicalises and normalises the iMPS
+
+using ITensors
+
+# BY GOOGLE GEMINI
+function normalize_mps(sites::Vector{ITensor}; maxdim::Int = 16, cutoff::Float64 = 1E-10)
+    N = length(sites)
+
+    for i in 1:N-1
+        A = sites[i]
+        s = inds(A)[2]
+        if isnothing(s)
+            error("Could not find a 'site' index on tensor at site $i")
+            return nothing
+        end
+
+        left_bond_index = inds(A)[1]
+        if i > 1
+            left_bond_index = commonind(A, sites[i-1])
+        end
+
+        combined_left_indices = IndexSet(s)
+        if isassigned(sites, i - 1)
+            combined_left_indices = IndexSet(combined_left_indices..., left_bond_index)
+        end
+
+        Q, R = qr(A, combined_left_indices; positive=true)
+        sites[i] = Q
+
+        next_A = sites[i+1]
+        common_bond_QR = commonind(R, next_A)
+        temp_tensor = next_A * R
+
+        # Perform SVD for truncation
+        U, S, V = svd(temp_tensor, inds(temp_tensor, common_bond_QR))
+        truncation = truncate!(S; maxdim=maxdim, cutoff=cutoff)
+        U_truncated = U * S
+        sites[i+1] = U_truncated * V # Note: V should have the outgoing bond
+    end
+
+    # Normalize the last site tensor
+    last_A = sites[N]
+    norm_factor = norm(last_A)
+    sites[N] = last_A / norm_factor
+
+    return sites
+end
+
+# Example usage:
+# Assume you have a Vector{ITensor} called 'my_sites'
+# my_normalized_sites = normalize_mps!(deepcopy(my_sites))
+
+
 # Computes the Von Neumann entropy of an iMPS at a given site
 function site_entropy(iMPS::Vector{ITensor}, site::Int64)
 
@@ -324,15 +385,15 @@ end
 
 let 
     # 
-    N = 4
-    bdim = 30
+    N = 6
+    bdim = 16
     sites = siteinds("Electron", N)
     links = [Index(bdim, "link-$i") for i in 1:N]
 
     # Create an iMPS with a known initial state
     psi = init_iMPS(N, sites, links)
     print(typeof(sites), "\n")
-    psi = set_FHstate(psi, sites, links, [0, 1, 0, 1])
+    psi = set_FHstate(psi, sites, links, [0, 1, 0, 0, 0, 0])
 
     # Define simulation parameters
     U = 0.0
@@ -356,7 +417,10 @@ let
         # First (square-rooted) odd gates are applied, then even, then odd gates again
         # The functions gen_gates and secondorder_STstep defined in the file "functions.jl"
         # implement this automatically, generating an array in which the gates are well-ordered
-        psi = ST_step(psi, secondorder_STgates)
+        psi = ST_step(psi, secondorder_STgates, maxdim = bdim)
+
+        # Normalize iMPS
+        psi = normalize_mps(psi)
 
 
         if mod(step, 50) == 0
