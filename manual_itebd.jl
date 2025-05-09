@@ -364,6 +364,35 @@ function normalize_mps(sites::Vector{ITensor}; maxdim::Int = 16, cutoff::Float64
     return sites
 end
 
+
+function normalize_imps(sites::Vector{ITensor})
+
+    N = length(sites)
+
+    # Contract over all physical indices
+
+    transfer_tensor = aaa
+
+    # Reshape tensor of D,D,D,D to get D^2,D^2 transfer matrix
+    i1, i2, i3, i4 = inds(transfer_tensor)
+    cleft = combiner(i1, i3)
+    cright = combiner(i2, i4)
+    transfer_matrix = transfer_tensor * cleft
+    transfer_matrix *= cright
+
+    # Diagonalise transfer matrix
+    eigenvalues = eigs(transfer_matrix)
+
+    # Get maximum eigenvalue
+    max_eigenvalue = max(eigenvalues)
+
+    # Rescale iMPS
+    sites /= max_eigenvalue
+
+    return sites
+end
+
+
 # Example usage:
 # Assume you have a Vector{ITensor} called 'my_sites'
 # my_normalized_sites = normalize_mps!(deepcopy(my_sites))
@@ -403,6 +432,8 @@ let
     cutoff = 1e-5
     dtau = 0.01
     steps = 200
+    checkevery = 10
+    framespersecond = 12
 
     mesures = []
 
@@ -420,10 +451,10 @@ let
         psi = ST_step(psi, secondorder_STgates, maxdim = bdim)
 
         # Normalize iMPS
-        psi = normalize_mps(psi)
+        #psi = normalize_mps(psi)
 
 
-        if mod(step, 50) == 0
+        if mod(step, checkevery) == 0
             
             # Measure density profile
             density = zeros(N)
@@ -432,6 +463,9 @@ let
                 density[pos] = scalar(imps_expect(psi, site_density, pos))
             end
 
+            idop = op("Id", sites[1])
+            normnow = imps_expect(psi, idop, 1)
+            println("Norm: ", normnow)
             plot(density, ylims = (0,1), legend=false,title="Iteració = $step")
             frame(anim)
 
@@ -458,7 +492,7 @@ let
     #savefig("density_1part.png")
 
     # Generate iTEBD animation
-    gif(anim, "1part_evol.gif", fps=6)
+    gif(anim, "1part_evol.gif", fps=framespersecond)
 
     # Generate energy evolution plot
     #plot(energies, yformatter = :scientific, ylimits=(-1e-15, 1e-15))
