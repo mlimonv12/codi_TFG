@@ -86,19 +86,18 @@ end
 
 
 # Generates a vector of Suzuki-Trotter gates for a Hubbard Hamiltonian
-function gen_gates(N::Int64, sites::Vector{Index{Int64}}, dtau::Float64; secondorder = true)
+function gen_gates(sites::Vector{Index{Int64}}, dtau::Float64; secondorder = true)
 
+    N = length(sites)
     gates = [ITensor() for _ in 1:N] # Define gates as an empty Vector{ITensor}
     
     for i in 1:N
 
         # Periodic boundary conditions
-        iplusone = mod1(i+1, N)
+        #iplusone = mod1(i+1, N)
 
-        # h = get_operator("TunnellingUP", sites, i)
-        h = op("Cup", sites[i]) * op("Cdagup", sites[mod1(i+1, N)])
-        h += op("Cdagup", sites[i]) * op("Cup", sites[mod1(i+1, N)])
-        h *= -1
+        h = get_operator("Onsite", sites, i) + get_operator("TunnellingDOWN", sites, i)
+        #h = get_operator("Hubbard", sites, i)
 
         # Second-order ST ordering: dτ is divided by two for odd gates, which will be applied twice
         if secondorder
@@ -120,7 +119,7 @@ end
 
 
 # Applies a two-site gate to an iMPS of type Vector{ITensor}, and returns the split iMPS sites
-function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-20, maxdim = 30)
+function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-10, maxdim = 30)
 
     # Check for double index connection: this is the case of a looped two-site unit cell iMPS
     l1, p1, r1 = inds(site1)
@@ -156,7 +155,8 @@ function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-2
     prodsite_matrix *= cright
 
     # Perform SVD
-    U, S, V = svd(prodsite_matrix, inds(prodsite_matrix)[1]; maxdim = maxdim)
+    U, S, V = svd(prodsite_matrix, inds(prodsite_matrix)[1]; maxdim = maxdim)#, cutoff = cutoff)
+    #println("INDS S: ", inds(S))
 
     # diagonal_array = [S[inds(S)[1]=>i, inds(S)[2]=>i] for i in 1:size(S)[1]]
     
@@ -195,21 +195,21 @@ end
 
 
 # Applies a Suzuki-Trotter step to an MPS
-function ST_step(iMPS::Vector{ITensor}, gates::Vector{ITensor}; secondorder = true, maxdim = 30)
+function ST_step(iMPS::Vector{ITensor}, gates::Vector{ITensor}; secondorder = true, maxdim = 30, cutoff = 1e-10)
 
     N = length(iMPS)
 
     # Odd sites
     for i in 1:N
         if isodd(i)
-            iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim)
+            iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim, cutoff = cutoff)
         end
     end
     
     # Even sites
     for i in 1:N
         if iseven(i)
-            iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim)
+            iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim, cutoff = cutoff)
         end
     end
     
@@ -217,7 +217,7 @@ function ST_step(iMPS::Vector{ITensor}, gates::Vector{ITensor}; secondorder = tr
     if secondorder
         for i in 1:N
             if isodd(i)
-                iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim)
+                iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim, cutoff = cutoff)
             end
         end
     end
@@ -227,41 +227,42 @@ end
 
 
 # Returns the matrix of a given jth-site operator, commonly used in this work
-function get_operator(name::String, sites::Vector{Index{Int64}}, site::Int64; t = 1.0, U = 0.0, μ = 0.0)
+function get_operator(name::String, sites::Vector{Index{Int64}}, site::Int64; t = 1.0, U = -4.0, μ = 0.0)
 
     N = length(sites)
-    nsite = mod1(site + 1, N) # Index of next site
+    nextsite = mod1(site + 1, N) # Index of next site
 
     if name == "TunnellingUP"
-        operator = op("Cdagup", sites[site]) * op("Cup", sites[mod1(site + 1, N)])
-        operator += op("Cup", sites[site]) * op("Cdagup", sites[mod1(site + 1, N)])
+        operator = op("Cdagup", sites[site]) * op("Cup", sites[nextsite])
+        operator += op("Cup", sites[site]) * op("Cdagup", sites[nextsite])
         operator *= -t
 
     elseif name == "TunnellingDOWN"
-        operator = op("Cdagdn", sites[site]) * op("Cdn", sites[mod1(site + 1, N)])
-        operator += op("Cdn", sites[site]) * op("Cdagdn", sites[mod1(site + 1, N)])
+        operator = op("Cdagdn", sites[site]) * op("Cdn", sites[nextsite])
+        operator += op("Cdn", sites[site]) * op("Cdagdn", sites[nextsite])
         operator *= -t
 
     elseif name == "Tunnelling"
-        operator = op("Cdagup", sites[site]) * op("Cup", sites[mod1(site + 1, N)])
-        operator += op("Cup", sites[site]) * op("Cdagup", sites[mod1(site + 1, N)])
-        operator += op("Cdagdn", sites[site]) * op("Cdn", sites[mod1(site + 1, N)])
-        operator += op("Cdn", sites[site]) * op("Cdagdn", sites[mod1(site + 1, N)])
+        operator = op("Cdagup", sites[site]) * op("Cup", sites[nextsite])
+        operator += op("Cup", sites[site]) * op("Cdagup", sites[nextsite])
+        operator += op("Cdagdn", sites[site]) * op("Cdn", sites[nextsite])
+        operator += op("Cdn", sites[site]) * op("Cdagdn", sites[nextsite])
         operator *= -t
     
     elseif name == "Onsite"
-        operator = -U * op("Nupdn", sites[site])
+        operator = U * op("Nupdn", sites[site]) * op("Id", sites[nextsite])
 
     elseif name == "ChemPot"
-        operator = -μ * op("Ntot", sites[site])
+        operator = -μ * op("Ntot", sites[site]) * op("Id", sites[nextsite])
     
     elseif name == "Hubbard"
-        operator = op("Cdagup", sites[site])*op("Cup", sites[mod1(site + 1, N)])
-        operator += op("Cup", sites[site])*op("Cdagup", sites[mod1(site + 1, N)])
-        operator += op("Cdagdn", sites[site])*op("Cdn", sites[mod1(site + 1, N)])
-        operator += op("Cdn", sites[site])*op("Cdagdn", sites[mod1(site + 1, N)])
-        operator *= -t
-        operator += -U * op("Nupdn", sites[site])
+        operator = get_operator("Tunnelling", sites, site)
+        operator += U * op("Nupdn", sites[site]) * op("Id", sites[nextsite])
+    
+    elseif name == "GCHubbard"
+        operator = get_operator("Tunnelling", sites, site)
+        #operator += U * op("Nupdn", sites[site]) * op("Id", sites[nextsite])
+        #operator += -μ * op("Ntot", sites[site]) * op("Id", sites[nextsite])
     
     else
         error("\n\n No operator identified with the following name: ", name)
@@ -409,6 +410,49 @@ function imps_expect(unitcell::Vector{ITensor}, operator::ITensor; tolerance = 1
 end
 
 
+
+# Same function as above, spares environment computation
+function imps_expect_optimal(unitcell::Vector{ITensor}, operator::ITensor, tfmatrix::ITensor, lenv::ITensor, renv::ITensor; tolerance = 1e-8)
+
+    N = length(unitcell)
+
+    # Contract iMPS cells
+    A = unitcell[1]
+    for i in 2:N
+        A *= unitcell[i]
+    end
+
+    Adag = prime(dag(A))
+
+    # println("A initial indices: ", inds(A))
+    # println("Operator indices: ", inds(operator))
+
+    # Compute A adjoint
+    # Aadj = 
+
+    # Contract R into A
+    A *= renv
+    # println("AR indices: ", inds(A))
+
+    # Contract At into RA
+    A *= Adag
+    # println("AtRA indices: ", inds(A))
+
+    # Contract operator into AtRA
+    A *= operator
+    #println("AtRA + operator indices: ", inds(A))
+
+    # Contract L into final tensor, scalar result
+    A *= lenv
+
+    #error("Parem per ara")
+    # Return observable
+    return scalar(A)
+
+end
+
+
+
 # DONE
 function transfermatrix(unitcell::Vector{ITensor})
 
@@ -434,6 +478,7 @@ function transfermatrix(unitcell::Vector{ITensor})
 
     # Contraction over all physical indices at once
     transfer_tensor *= lower_tftensor
+    #println("Mirem aqui: ", inds(transfer_tensor))
 
     # Reshape transfer tensor to matrix
     # println("Transfer tensor indices: ", inds(transfer_tensor), "\n")
@@ -461,6 +506,8 @@ function lateral_env(transfermatrix::ITensor, tolerance::Float64, lateralind::In
     lvec = randomITensor(connect)
     lvec_prev = randomITensor(connect)
 
+    counter = 0
+
     while (norm(lvec - lvec_prev) > tolerance)
         lvec_prev = lvec
         lvec *= transfermatrix
@@ -468,8 +515,16 @@ function lateral_env(transfermatrix::ITensor, tolerance::Float64, lateralind::In
         lvec /= norm(lvec)
 
         lvec = replaceinds(lvec, (other => connect))
+
+        counter += 1
+        if (mod(counter, 10000) == 0)
+            lvec = randomITensor(connect)
+            println("\t > Reset lateral env vector")
+            counter = 0
+        end
     end
 
+    println("Computed lateral vector in ", counter, " iterations")
     separator = combiner(lateralind, prime(lateralind))
     separator = replaceinds(separator, (inds(separator)[1] => connect))
 
@@ -528,7 +583,7 @@ end
 
 let 
     # 
-    N = 2
+    N = 3
     bdim = 16
     sites = siteinds("Electron", N)
     links = [Index(bdim, "link-$i") for i in 0:N]
@@ -541,37 +596,49 @@ let
     # Define simulation parameters
     U = 0.0
     μ = 0.0
-    
+
     # iTEBD parameters, gates and operator
     cutoff = 1e-5
     dtau = 0.01
-    steps = 100
-    checkevery = 10
+    steps = 940
+    checkevery = 20
     framespersecond = 6
+    tolerance = 1e-8
 
     mesures = []
+    lind = inds(psi[1])[1]
     #println("PRINCIPI ", inds(psi[1]))
 
     # Generate iTEBD gates
-    secondorder_STgates = gen_gates(N, sites, dtau)
+    secondorder_STgates = gen_gates(sites, dtau)
 
     # Prepare iMPS to apply iTEBD
+    psi = normalise_unitcell(psi)
     psi = loop_iMPS(psi)
+
+    # probability vector, should be 1 through all iterations for particle number conservation
+    totalupprob = []
+    totaldnprob = []
 
     # Begin iTEBD loop
     for step in 1:steps
 
         println("Step ", step, " of ", steps)
-        
+
         # Evolve the system using iTEBD, second-order Suzuki-Trotter gate ordering:
         # First (square-rooted) odd gates are applied, then even, then odd gates again
         # The functions gen_gates and secondorder_STstep defined in the file "functions.jl"
         # implement this automatically, generating an array in which the gates are well-ordered
-        psi = ST_step(psi, secondorder_STgates, maxdim = bdim)
+        psi = ST_step(psi, secondorder_STgates, maxdim = bdim, cutoff=cutoff)
 
         # Un-loop iMPS
-        psi = unloop_iMPS(psi, links[1])
-
+        # psi = unloop_iMPS(psi, links[1])
+        psi = unloop_iMPS(psi, lind)
+        
+        # Find lateral indices: doing this in every iTEBD step allows for bond dimension flexibility
+        lind = inds(psi[1])[1]
+        rind = inds(psi[N])[3]
+        
         # Normalise iMPS
         psi = normalise_unitcell(psi)
 
@@ -585,20 +652,36 @@ let
             psi = unloop_iMPS(psi, links[1])
             
             # Measure density profile
-            density = zeros(N)
+            dens_up = zeros(N)
+            dens_dn = zeros(N)
+
+            # Compute transfer matrix and lateral vectors for observables
+            tfmatrix = transfermatrix(psi)
+            lvec = lateral_env(tfmatrix, tolerance, lind)
+            rvec = lateral_env(tfmatrix, tolerance, rind, left = false)
+
+
             for pos in 1:N
                 site_density = op("Nup", sites[pos])
+                dens_down = op("Ndn", sites[pos])
                 for j in 1:(N-1)
                     respos = mod1(pos + j, N)
                     site_density *= delta(dag(sites[mod1(respos, N)]), sites[mod1(respos, N)]')
-                    #site_density *= op("Id", sites[mod1(pos+1, N)])
+                    dens_down *= delta(dag(sites[mod1(respos, N)]), sites[mod1(respos, N)]')
+                    # site_density *= op("Id", sites[mod1(pos+1, N)])
                 end
 
                 #println("AAAAA, : ", inds(site_density))
-                density[pos] = imps_expect(psi, site_density)
+                dens_up[pos] = abs(imps_expect_optimal(psi, site_density, tfmatrix, lvec, rvec))
+                dens_dn[pos] = abs(imps_expect_optimal(psi, dens_down, tfmatrix, lvec, rvec))
             end
 
-            plot(density, ylims = (0,1), legend=false, title="Iteració = $step")
+            push!(totalupprob, sum(dens_up))
+            push!(totaldnprob, sum(dens_dn))
+
+            # ylims = (0,1),
+            plot(dens_up, ylims=(0,1), legend=false, title="Iteració = $step", lc=:red, linewidth=3) # Nup
+            plot!(dens_dn, ylims=(0,1), legend=false, lc=:blue, linewidth=3) # Ndn
             frame(anim)
 
             # Re-loop iMPS to continue iTEBD
@@ -608,6 +691,7 @@ let
 
 
     end
+
 
 
 
@@ -628,6 +712,11 @@ let
 
     # Generate iTEBD animation
     gif(anim, "1part_evol.gif", fps=framespersecond)
+
+
+    plot(totalupprob, ylim=(0,3), lc=:red, title="Probabilitat total de trobar la partícula")
+    plot!(totaldnprob, ylim=(0,3), lc=:blue, title="Probabilitat total de trobar la partícula")
+    savefig("Prob_uppart.png")
 
     # Generate energy evolution plot
     #plot(energies, yformatter = :scientific, ylimits=(-1e-15, 1e-15))
