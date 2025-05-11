@@ -38,7 +38,7 @@ end
 # Initializes an MPS as a Vector{ITensor}. Allows for iMPS selection
 function init_iMPS(N::Int64, sites::Vector, links::Vector; infinite = true)
 
-    psi = [randomITensor(links[mod1(i-1, N)], sites[i], links[i]) for i in 1:N]
+    psi = [randomITensor(links[i], sites[i], links[i+1]) for i in 1:N]
 
     if !infinite
         psi[1] = randomITensor(sites[1], links[1])
@@ -58,8 +58,8 @@ function set_FHstate(iMPS::Vector{ITensor}, sites::Vector, links::Vector, state:
 
     for i in 1:N
         #print("AAA", typeof(state[i]), "\n")
-        T = ITensor(links[mod1(i-1, N)], sites[i], links[i])
-        T[links[mod1(i-1, N)]=>bdim, sites[i]=>references[state[i]], links[i]=>bdim] = 1.0
+        T = ITensor(links[i], sites[i], links[i+1])
+        T[links[i]=>bdim, sites[i]=>references[state[i]], links[i+1]=>bdim] = 1.0
         iMPS[i] = T
         #MPS[i][links(i), sites[i]=>Dict(state[i]), links(mod1(i+1,N))] = 1.0
     end
@@ -98,6 +98,7 @@ function gen_gates(N::Int64, sites::Vector{Index{Int64}}, dtau::Float64; secondo
         # h = get_operator("TunnellingUP", sites, i)
         h = op("Cup", sites[i]) * op("Cdagup", sites[mod1(i+1, N)])
         h += op("Cdagup", sites[i]) * op("Cup", sites[mod1(i+1, N)])
+        h *= -1
 
         # Second-order ST ordering: dτ is divided by two for odd gates, which will be applied twice
         if secondorder
@@ -109,7 +110,7 @@ function gen_gates(N::Int64, sites::Vector{Index{Int64}}, dtau::Float64; secondo
         else
             gate = exp(-dtau * h)
         end
-        println(inds(gate))
+        #println(inds(gate))
 
         gates[i] = gate 
     end
@@ -121,18 +122,34 @@ end
 # Applies a two-site gate to an iMPS of type Vector{ITensor}, and returns the split iMPS sites
 function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-20, maxdim = 30)
 
+    # Check for double index connection: this is the case of a looped two-site unit cell iMPS
+    l1, p1, r1 = inds(site1)
+    l2, p2, r2 = inds(site2)
+
+    #println("SITE1: ", inds(site1))
+    #println("SITE2: ", inds(site2))
+
+    # Prime leftmost internal index to prevent double contractions
+    prime!(site1, l1)
+
+    # If the double connection is given, one of the lateral indices is primed to avoid double contractions
+    #if (l1 == r2) && (r1 == l2)
+    #    println("caca aqui")
+    #    prime!(site1, l1)
+    #end
+
     # Contract the site at pos with the next one, two-site gate
     prodsite = site1 * site2
 
     # Contract the joint site with the two-site operator
     prodsite_evol = gate * prodsite
-
-    #println("prodsite_inds: ", inds(prodsite_evol))
+    #println("123", inds(prodsite_evol))
 
     # Define combiner tensors for left and right sides: this will help switch prodsite_evol
     # from a D,d,d,D indexed tensor to a D*d, D*d tensor, enabling SVD
-    cleft = combiner(inds(prodsite_evol)[1], inds(prodsite_evol)[3])
-    cright = combiner(inds(prodsite_evol)[2], inds(prodsite_evol)[4])
+    i1, i2, i3, i4 = inds(prodsite_evol)
+    cleft = combiner(i1, i3)
+    cright = combiner(i2, i4)
 
     # Apply combiners, making prodsite_matrix a D*d, D*d tensor
     prodsite_matrix = prodsite_evol * cleft
@@ -156,8 +173,8 @@ function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-2
     sql = copy(sqS)
     sqr = copy(sqS)
     # Replace the sql right index with the site1-site2 internal index
-    replaceindex!(sql, inds(sql)[2], inds(site2)[1])
-    replaceindex!(sqr, inds(sqr)[1], inds(site2)[1])
+    replaceindex!(sql, inds(sql)[2], r1)
+    replaceindex!(sqr, inds(sqr)[1], r1)
     
     # Finally form and reshape the new site tensors, of indices D,d,D
     #println("inds U: ", inds(U))
@@ -167,10 +184,10 @@ function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-2
     R = sqr * V * dag(cright)
     
     L = permute(L, inds(L)[2], inds(L)[1], inds(L)[3])
-    #println("inds Lfinal: ", inds(L))
-    #println("inds Rfinal: ", inds(R))
-
-    #println("cacotacomsiguiaixo: ", inds(L))
+    L = noprime(L)
+    R = noprime(R)
+    #println("Indexos de L: ", inds(L))
+    #println("Indexos de R: ", inds(R), "\n")
 
     # Return updated sites
     return L, R
@@ -247,8 +264,8 @@ function get_operator(name::String, sites::Vector{Index{Int64}}, site::Int64; t 
         operator += -U * op("Nupdn", sites[site])
     
     else
-        print("\n\n No operator identified with the following name: ", name, ". Aborting program \n")
-        throw(InterruptException())
+        error("\n\n No operator identified with the following name: ", name)
+        #throw(InterruptException())
     end
 
     return operator
@@ -258,7 +275,7 @@ end
 # Returns the expected value of a given operator for an iMPS made of Vector{ITensor}
 # Works for operators of any size
 # Computes the expected value of an operator in an iMPS Vector{ITensor} object
-function imps_expect(iMPS::Vector{ITensor}, operator::ITensor, site::Int64)
+function imps_expect2(iMPS::Vector{ITensor}, operator::ITensor, site::Int64)
 
     # Find number of sites the operator acts on
     s = Int64(length(size(operator))/2)
@@ -318,79 +335,176 @@ end
 
 # Canonicalises and normalises the iMPS
 
-using ITensors
 
-# BY GOOGLE GEMINI
-function normalize_mps(sites::Vector{ITensor}; maxdim::Int = 16, cutoff::Float64 = 1E-10)
-    N = length(sites)
+# DONE
+function normalise_unitcell(unitcell::Vector{ITensor})
 
-    for i in 1:N-1
-        A = sites[i]
-        s = inds(A)[2]
-        if isnothing(s)
-            error("Could not find a 'site' index on tensor at site $i")
-            return nothing
-        end
+    # Get transfer matrix
+    tf_matrix = transfermatrix(unitcell)
+    linds, rinds = inds(tf_matrix)
 
-        left_bond_index = inds(A)[1]
-        if i > 1
-            left_bond_index = commonind(A, sites[i-1])
-        end
 
-        combined_left_indices = IndexSet(s)
-        if isassigned(sites, i - 1)
-            combined_left_indices = IndexSet(combined_left_indices..., left_bond_index)
-        end
+    # Diagonalise
+    eigenvals, eigenvecs = eigen(tf_matrix, linds, rinds)
 
-        Q, R = qr(A, combined_left_indices; positive=true)
-        sites[i] = Q
+    # Get dominant eigenvalue
+    dominant_eigenvalue = maximum(abs, eigenvals)
 
-        next_A = sites[i+1]
-        common_bond_QR = commonind(R, next_A)
-        temp_tensor = next_A * R
+    # Normalise
+    N = length(unitcell)
+    normal_unitcell = unitcell / sqrt(dominant_eigenvalue^(1/N))
 
-        # Perform SVD for truncation
-        U, S, V = svd(temp_tensor, inds(temp_tensor, common_bond_QR))
-        truncation = truncate!(S; maxdim=maxdim, cutoff=cutoff)
-        U_truncated = U * S
-        sites[i+1] = U_truncated * V # Note: V should have the outgoing bond
-    end
-
-    # Normalize the last site tensor
-    last_A = sites[N]
-    norm_factor = norm(last_A)
-    sites[N] = last_A / norm_factor
-
-    return sites
+    return normal_unitcell#, dominant_eigenvalue
 end
 
 
-function normalize_imps(sites::Vector{ITensor})
 
-    N = length(sites)
+# DONE?
+function imps_expect(unitcell::Vector{ITensor}, operator::ITensor; tolerance = 1e-8)
 
-    # Contract over all physical indices
+    N = length(unitcell)
 
-    transfer_tensor = aaa
+    # Define lateralmost indices
+    lind = inds(unitcell[1])[1]
+    rind = inds(unitcell[N])[3]
 
-    # Reshape tensor of D,D,D,D to get D^2,D^2 transfer matrix
+    tfmatrix = transfermatrix(unitcell)
+    # println("Tf matrix type: ", typeof(tfmatrix), inds(tfmatrix))
+
+    lenv = lateral_env(tfmatrix, tolerance, lind)
+    renv = lateral_env(tfmatrix, tolerance, rind; left = false)
+
+    # Contract iMPS cells
+    A = unitcell[1]
+    for i in 2:N
+        A *= unitcell[i]
+    end
+
+    Adag = prime(dag(A))
+
+    # println("A initial indices: ", inds(A))
+    # println("Operator indices: ", inds(operator))
+
+    # Compute A adjoint
+    # Aadj = 
+
+    # Contract R into A
+    A *= renv
+    # println("AR indices: ", inds(A))
+
+    # Contract At into RA
+    A *= Adag
+    # println("AtRA indices: ", inds(A))
+
+    # Contract operator into AtRA
+    A *= operator
+    #println("AtRA + operator indices: ", inds(A))
+
+    # Contract L into final tensor, scalar result
+    A *= lenv
+
+    #error("Parem per ara")
+    # Return observable
+    return scalar(A)
+end
+
+
+# DONE
+function transfermatrix(unitcell::Vector{ITensor})
+
+    N = length(unitcell)
+    
+    # Contract over internal indices
+    transfer_tensor = unitcell[1]
+    for i in 2:N
+        transfer_tensor *= unitcell[i]
+    end
+
+    #println("First tf tensor indices: ", inds(transfer_tensor))
+
+    # Contract over physical indices. We prime lateral indices to avoid accidental contraction
+    lower_tftensor = dag(copy(transfer_tensor))
+
+    ## Lateral virtual index identification
+    lind = inds(unitcell[1])[1]
+    rind = inds(unitcell[N])[3]
+
+    prime!(lower_tftensor, lind, rind)
+    # println("Mirror tf tensor indices: ", inds(lower_tftensor))
+
+    # Contraction over all physical indices at once
+    transfer_tensor *= lower_tftensor
+
+    # Reshape transfer tensor to matrix
+    # println("Transfer tensor indices: ", inds(transfer_tensor), "\n")
     i1, i2, i3, i4 = inds(transfer_tensor)
     cleft = combiner(i1, i3)
     cright = combiner(i2, i4)
-    transfer_matrix = transfer_tensor * cleft
-    transfer_matrix *= cright
 
-    # Diagonalise transfer matrix
-    eigenvalues = eigs(transfer_matrix)
-
-    # Get maximum eigenvalue
-    max_eigenvalue = max(eigenvalues)
-
-    # Rescale iMPS
-    sites /= max_eigenvalue
-
-    return sites
+    return transfer_tensor * cleft * cright
 end
+
+
+# FIRST ATTEMPT: iterative method
+function lateral_env(transfermatrix::ITensor, tolerance::Float64, lateralind::Index{Int64}; left = true)
+
+    l, r = inds(transfermatrix)
+
+    if left
+        connect = l
+        other = r
+    else
+        connect = r
+        other = l
+    end
+
+    lvec = randomITensor(connect)
+    lvec_prev = randomITensor(connect)
+
+    while (norm(lvec - lvec_prev) > tolerance)
+        lvec_prev = lvec
+        lvec *= transfermatrix
+
+        lvec /= norm(lvec)
+
+        lvec = replaceinds(lvec, (other => connect))
+    end
+
+    separator = combiner(lateralind, prime(lateralind))
+    separator = replaceinds(separator, (inds(separator)[1] => connect))
+
+    lenv = lvec * separator
+
+    return lenv
+end
+
+
+function loop_iMPS(unitcell::Vector{ITensor})
+
+    N = length(unitcell)
+
+    # Get lateral indices
+    l1, p1, r1 = inds(unitcell[1])
+    ln, pn, rn = inds(unitcell[N])
+
+    replaceinds!(unitcell[1], (l1 => rn))
+
+    return unitcell
+end
+
+
+function unloop_iMPS(unitcell::Vector{ITensor}, leftindex::Index{Int64})
+
+    # Get first cell indices
+    rn, p1, r1 = inds(unitcell[1])
+
+    replaceinds!(unitcell[1], (rn => leftindex))
+
+    return unitcell
+end
+
+
+
 
 
 # Example usage:
@@ -414,15 +528,15 @@ end
 
 let 
     # 
-    N = 6
+    N = 2
     bdim = 16
     sites = siteinds("Electron", N)
-    links = [Index(bdim, "link-$i") for i in 1:N]
+    links = [Index(bdim, "link-$i") for i in 0:N]
 
     # Create an iMPS with a known initial state
     psi = init_iMPS(N, sites, links)
-    print(typeof(sites), "\n")
-    psi = set_FHstate(psi, sites, links, [0, 1, 0, 0, 0, 0])
+    #print(typeof(sites), "\n")
+    psi = set_FHstate(psi, sites, links, [0,1,0,0,0])
 
     # Define simulation parameters
     U = 0.0
@@ -431,15 +545,20 @@ let
     # iTEBD parameters, gates and operator
     cutoff = 1e-5
     dtau = 0.01
-    steps = 200
+    steps = 100
     checkevery = 10
-    framespersecond = 12
+    framespersecond = 6
 
     mesures = []
+    #println("PRINCIPI ", inds(psi[1]))
 
     # Generate iTEBD gates
     secondorder_STgates = gen_gates(N, sites, dtau)
 
+    # Prepare iMPS to apply iTEBD
+    psi = loop_iMPS(psi)
+
+    # Begin iTEBD loop
     for step in 1:steps
 
         println("Step ", step, " of ", steps)
@@ -450,24 +569,40 @@ let
         # implement this automatically, generating an array in which the gates are well-ordered
         psi = ST_step(psi, secondorder_STgates, maxdim = bdim)
 
-        # Normalize iMPS
-        #psi = normalize_mps(psi)
+        # Un-loop iMPS
+        psi = unloop_iMPS(psi, links[1])
+
+        # Normalise iMPS
+        psi = normalise_unitcell(psi)
+
+        # Re-loop iMPS
+        psi = loop_iMPS(psi)
 
 
         if mod(step, checkevery) == 0
+
+            # Unloop iMPS to compute expectation values
+            psi = unloop_iMPS(psi, links[1])
             
             # Measure density profile
             density = zeros(N)
             for pos in 1:N
                 site_density = op("Nup", sites[pos])
-                density[pos] = scalar(imps_expect(psi, site_density, pos))
+                for j in 1:(N-1)
+                    respos = mod1(pos + j, N)
+                    site_density *= delta(dag(sites[mod1(respos, N)]), sites[mod1(respos, N)]')
+                    #site_density *= op("Id", sites[mod1(pos+1, N)])
+                end
+
+                #println("AAAAA, : ", inds(site_density))
+                density[pos] = imps_expect(psi, site_density)
             end
 
-            idop = op("Id", sites[1])
-            normnow = imps_expect(psi, idop, 1)
-            println("Norm: ", normnow)
-            plot(density, ylims = (0,1), legend=false,title="Iteració = $step")
+            plot(density, ylims = (0,1), legend=false, title="Iteració = $step")
             frame(anim)
+
+            # Re-loop iMPS to continue iTEBD
+            psi = loop_iMPS(psi)
 
         end
 
@@ -476,13 +611,13 @@ let
 
 
 
-    j = 1
-    gate1 = op("Ntot", sites[j])
-    expect2 = scalar(imps_expect(psi, gate1, j))
+    #j = 1
+    #gate1 = op("Ntot", sites[j])
+    #expect2 = scalar(imps_expect(psi, gate1, j))
     #expect2 = imps_expect(psi, gate1, 2)
-    print("Escalar final = ", expect2, "\n")
+    #print("Escalar final = ", expect2, "\n")
     #print("Escalar final = ", inds(expect2), "\n")
-    print()
+    #print()
 
     # Observable measurement
     #n = expect(psi, "Nup")

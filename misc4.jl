@@ -2,13 +2,47 @@ using ITensors, ITensorMPS
 
 # Define MPS
 N = 2 # Unit cell size
-bdim = 5
+bdim = 10
 sites = siteinds("Electron", N)
 #sites = [Index(4, "link-$i") for i in 1:N]
 links = [Index(bdim, "link-$i") for i in 0:N]
 
 # Generate iMPS explicitly
 psi = [randomITensor(links[i], sites[i], links[i+1]) for i in 1:N]
+
+# PSEUDOCODE
+function expected_imps(unitcell::Vector{ITensor}, operator; tolerance = 1e-8)
+
+    lenv = lateral_env(unitcell)
+    renv = lateral_env(unitcell; left = false)
+
+    # Contract iMPS cells
+    A = unitcell[1]
+    for i in 2:N
+        A *= unitcell[i]
+    end
+    
+    # define A'
+    lind = inds(unitcell[1])[1]
+    rind = inds(unitcell[N])[3]
+    #Aprime = prime(A, lind, rind)
+
+    # Contract R into A
+    A *= renv
+
+    # Contract A' into RA
+    A *= prime(A, lind, rind)
+
+    # Contract operator into A'RA
+    A *= operator
+
+    # Contract L into final tensor, scalar result
+    A *= lenv
+
+    # Return observable
+    return scalar(A)
+end
+
 
 # DONE
 function transfermatrix(unitcell::Vector{ITensor})
@@ -41,7 +75,6 @@ function transfermatrix(unitcell::Vector{ITensor})
     return transfer_tensor * cleft * cright
 end
 
-
 # DONE
 function normalise_unitcell(unitcell::Vector{ITensor})
 
@@ -57,43 +90,98 @@ function normalise_unitcell(unitcell::Vector{ITensor})
     dominant_eigenvalue = maximum(abs, eigenvals)
 
     # Normalise
-    normal_unitcell = [site/sqrt(dominant_eigenvalue) for site in unitcell]
+    N = length(unitcell)
+    normal_unitcell = unitcell / sqrt(dominant_eigenvalue^(1/N))
 
     return normal_unitcell, dominant_eigenvalue
 end
 
 
-# TO COMPUTE EXPECTATION VALUES OF THE MPS:
+# FIRST ATTEMPT: iterative method
+function lateral_env(transfermatrix::ITensor, tolerance::Float64, lateralind::Index{Int64}; left = true)
 
-# 1. LEFT-CANONICALISE UNIT CELL
-# 2. COMPUTE LEFT ENV.
-# 3. RIGHT-CANONICALISE UNIT CELL (ORIGINAL COPY)
-# 4. COMPUTE RIGHT ENV.
-# APPLY BOTH ENVS.
+    l, r = inds(transfermatrix)
 
+    if left
+        connect = l
+        other = r
+    else
+        connect = r
+        other = l
+    end
 
+    lvec = randomITensor(connect)
+    lvec_prev = randomITensor(connect)
 
+    while (norm(lvec - lvec_prev) > tolerance)
+        lvec_prev = lvec
+        lvec *= transfermatrix
 
+        lvec /= norm(lvec)
 
+        lvec = replaceinds(lvec, (other => connect))
+    end
 
-function left_env(tfmatrix::ITensor)
+    separator = combiner(lateralind, prime(lateralind))
+    separator = replaceinds(separator, (inds(separator)[1] => l))
 
-    # Diagonalise transfer matrix
-
-
-    #
-
+    lenv = lvec * separator
 
     return lenv
 end
 
 
 
+function loop_iMPS(unitcell::Vector{ITensor})
+
+    N = length(unitcell)
+
+    # Get lateral indices
+    l1, p1, r1 = inds(unitcell[1])
+    ln, pn, rn = inds(unitcell[N])
+
+    replaceinds!(unitcell[1], (l1 => rn))
+
+    return unitcell
+end
+
+
+function unloop_iMPS(unitcell::Vector{ITensor}, leftindex::Index{Int64})
+
+    # Get first cell indices
+    rn, p1, r1 = inds(unitcell[1])
+
+    replaceinds!(unitcell[1], (rn => leftindex))
+
+    return unitcell
+end
+
+
+
+
+
+
+
 println("Comença")
 
-prova1 = transfermatrix(psi)
-println(typeof(prova1))
-prova2 = normalise_unitcell(psi)
+
+prova2, dom_eig = normalise_unitcell(psi)
+println(typeof(prova2))
+prova1 = transfermatrix(prova2)
 
 println("Acaba")
 println(inds(prova1))
+
+# Check normalisation
+lind, rind = inds(prova1)
+evals, evecs = eigen(prova1, lind, rind)
+
+#evals_conj = adjoint(evals)
+
+#evals *= evals_conj
+
+eval_vec = [abs(evals[i,i]) for i in 1:size(evals)[1]]
+
+j=1
+println("eigenvalues: ", maximum(eval_vec))
+

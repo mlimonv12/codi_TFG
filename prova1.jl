@@ -1,275 +1,631 @@
-using Markdown
-
-md"""
-# [Hubbard chain at half filling](@id hubbard)
-
-The Hubbard model is a model of interacting fermions on a lattice, which is often used as a somewhat realistic model for electrons in a solid.
-The Hamiltonian consists of two terms that describe competing forces of each electron:
-a kinetic term that allows electrons to hop between neighboring sites, and a potential term reflecting on-site interactions between electrons.
-Often, a third term is included which serves as a chemical potential to control the number of electrons in the system.
-
-```math
-H = -t \sum_{\langle i, j \rangle, \sigma} c^{\dagger}_{i,\sigma} c_{j,\sigma} + U \sum_i n_{i,\uparrow} n_{i,\downarrow} - \mu \sum_{i,\sigma} n_{i,\sigma}
-```
-
-At half-filling, the system exhibits particle-hole symmetry, which can be made explicit by rewriting the Hamiltonian slightly.
-First, we fix the overall energy scale by setting `t = 1`, and then shift the total energy by adding a constant `U / 4`, as well as shifting the chemical potential to `N U / 2`.
-This results in the following Hamiltonian:
-
-```math
-H = - \sum_{\langle i, j \rangle, \sigma} c^{\dagger}_{i,\sigma} c_{j,\sigma} + U / 4 \sum_i (1 - 2 n_{i,\uparrow}) (1 - 2 n_{i,\downarrow}) - \mu \sum_{i,\sigma} n_{i,\sigma}
-```
-
-Finally, setting `\mu = 0` and defining `u = U / 4` we obtain the Hubbard model at half-filling.
-
-```math
-H = - \sum_{\langle i, j \rangle, \sigma} c^{\dagger}_{i,\sigma} c_{j,\sigma} + u \sum_i (1 - 2 n_{i,\uparrow}) (1 - 2 n_{i,\downarrow})
-```
-"""
-
-using TensorKit
-using MPSKit
-using MPSKitModels
-using SpecialFunctions: besselj0, besselj1
-using QuadGK: quadgk
+using ITensors, ITensorMPS
 using Plots
-using Interpolations
-using Optim
+gr()
 
-const t = 1.0
-const mu = 0.0
-const U = 3.0
+#include("functions.jl") # Removed this line as it's not needed for the example to run
 
-md"""
-For this case, the groundstate energy has an analytic solution, which can be used to benchmark the numerical results.
-It follows from Eq. (6.82) in []().
+# Generates a FH Hamiltonian MPO for U, μ values
+function FH_Hamiltonian(N, sites, U, μ)
+    t = 1.0 # Hopping amplitude
+    os = OpSum()
+    for j in 1:(N - 1)
 
-```math
-e(u) = - u - 4 \int_0^{\infty} \frac{d\omega}{\omega} \frac{J_0(\omega) J_1(\omega)}{1 + \exp(2u \omega)}
-```
+        # Hopping terms
+        os += -t, "Cdagup", j, "Cup", j + 1 # Changed mod1(j + 1, N) to j+1
+        os += -t, "Cup", j, "Cdagup", j + 1 # Changed mod1(j + 1, N) to j+1
+        os += -t, "Cdagdn", j, "Cdn", j + 1 # Changed mod1(j + 1, N) to j+1
+        os += -t, "Cdn", j, "Cdagdn", j + 1 # Changed mod1(j + 1, N) to j+1
 
-We can easily verify this by comparing the numerical results to the analytic solution.
-"""
+        # On-site interaction
+        os += U, "Nup", j, "Ndn", j
 
-function hubbard_energy(u; rtol=1e-12)
-    integrandum(ω) = besselj0(ω) * besselj1(ω) / (1 + exp(2u * ω)) / ω
-    int, err = quadgk(integrandum, 0, Inf; rtol=rtol)
-    return -u - 4 * int
-end
-
-function compute_groundstate(psi, H;
-                             svalue=1e-3,
-                             expansionfactor=(1 / 10),
-                             expansioniter=20)
-    verbosity = 2
-    psi, = find_groundstate(psi, H; tol=svalue * 10, verbosity)
-    for _ in 1:expansioniter
-        D = maximum(x -> dim(left_virtualspace(psi, x)), 1:length(psi))
-        D′ = max(5, round(Int, D * expansionfactor))
-        trscheme = truncbelow(svalue / 10) & truncdim(D′)
-        psi′, = changebonds(psi, H, OptimalExpand(; trscheme=trscheme))
-        all(left_virtualspace.(Ref(psi), 1:length(psi)) .==
-            left_virtualspace.(Ref(psi′), 1:length(psi))) && break
-        psi, = find_groundstate(psi′, H, VUMPS(; tol=svalue / 5, maxiter=10, verbosity))
+        # Chemical potential
+        os += μ, "Ntot", j
     end
 
-    ## convergence steps
-    psi, = changebonds(psi, H, SvdCut(; trscheme=truncbelow(svalue)))
-    psi, = find_groundstate(psi, H,
-                            VUMPS(; tol=svalue / 100, verbosity, maxiter=100) &
-                            GradientGrassmann(; tol=svalue / 1000))
+    os += U, "Nup", N, "Ndn", N
+    os += μ, "Ntot", N
+
+    H = MPO(os, sites)
+
+    return H
+end
+
+
+# Initializes an MPS as a Vector{ITensor}. Allows for iMPS selection
+function init_iMPS(N::Int64, sites::Vector, links::Vector; infinite = true)
+
+    psi = [randomITensor(links[i], sites[i], links[i+1]) for i in 1:N]
+
+    if !infinite
+        psi[1] = randomITensor(sites[1], links[1])
+        psi[N] = randomITensor(links[N-1], sites[N])
+    end
 
     return psi
 end
 
-H = hubbard_model(InfiniteChain(2); U, t, mu=U / 2)
-Vspaces = fill(Vect[fℤ₂](0 => 10, 1 => 10), 2)
-psi = InfiniteMPS(physicalspace(H), Vspaces)
-psi = compute_groundstate(psi, H)
-E = real(expectation_value(psi, H)) / 2
-@info """
-Groundstate energy:
-    * numerical: $E
-    * analytic: $(hubbard_energy(U / 4) - U / 4)
-"""
 
-md"""
-## Symmetries
+# Sets a given FH state for an MPS. Input is the MPS and a vector where 1:empty, 2:up, 3:dn, 4:updn
+function set_FHstate(iMPS::Vector{ITensor}, sites::Vector, links::Vector, state::Vector; bdim=10)
 
-The Hubbard model has a rich symmetry structure, which can be exploited to speed up simulations.
-Apart from the fermionic parity, the model also has a $U(1)$ particle number symmetry, along with a $SU(2)$ spin symmetry.
-Explicitly imposing these symmetries on the tensors can greatly reduce the computational cost of the simulation.
+    N = length(iMPS)
 
-Naively imposing these symmetries however, is not compatible with our desire to work at half-filling.
-By construction, imposing symmetries restricts the optimization procedure to a single symmetry sector, which is the trivial sector.
-In order to work at half-filling, we need to effectively inject one particle per site.
-In MPSKit, this is achieved by the `add_physical_charge` function, which shifts the physical spaces of the tensors to the desired charge sector.
-"""
+    references = Dict(0=>"Emp", 1=>"Up", 2=>"Dn", 3=>"UpDn")
 
-H_u1_su2 = hubbard_model(ComplexF64, U1Irrep, SU2Irrep, InfiniteChain(2); U, t, mu=U / 2);
-charges = fill(FermionParity(1) ⊠ U1Irrep(1) ⊠ SU2Irrep(0), 2);
-H_u1_su2 = MPSKit.add_physical_charge(H_u1_su2, charges);
+    for i in 1:N
+        #print("AAA", typeof(state[i]), "\n")
+        T = ITensor(links[i], sites[i], links[i+1])
+        T[links[i]=>bdim, sites[i]=>references[state[i]], links[i+1]=>bdim] = 1.0
+        iMPS[i] = T
+        #MPS[i][links(i), sites[i]=>Dict(state[i]), links(mod1(i+1,N))] = 1.0
+    end
 
-pspaces = physicalspace.(Ref(H_u1_su2), 1:2)
-vspaces = [oneunit(eltype(pspaces)), first(pspaces)]
-psi = InfiniteMPS(pspaces, vspaces)
-psi = compute_groundstate(psi, H_u1_su2; expansionfactor=1 / 3)
-E = real(expectation_value(psi, H_u1_su2)) / 2
-@info """
-Groundstate energy:
-    * numerical: $E
-    * analytic: $(hubbard_energy(U / 4) - U / 4)
-"""
-
-md"""
-## Excitations
-
-Because of the integrability, it is known that the Hubbard model has a rich excitation spectrum.
-The elementary excitations are known as spinons and holons, which are domain walls in the spin and charge sectors, respectively.
-The fact that the spin and charge sectors are separate is a phenomenon known as spin-charge separation.
-
-The domain walls can be constructed by noticing that there are two equivalent groundstates, which differ by a translation over a single site.
-In other words, the groundstates are ``\psi_{AB}` and ``\psi_{BA}``, where ``A`` and ``B`` are the two sites.
-These excitations can be constructed as follows:
-"""
-
-alg = QuasiparticleAnsatz(; tol=1e-3)
-momenta = range(-π, π; length=33)
-psi_AB = psi
-envs_AB = environments(psi_AB, H_u1_su2);
-psi_BA = circshift(psi, 1)
-envs_BA = environments(psi_BA, H_u1_su2);
-
-spinon_charge = FermionParity(0) ⊠ U1Irrep(0) ⊠ SU2Irrep(1 // 2)
-E_spinon, ϕ_spinon = excitations(H_u1_su2, alg, momenta,
-                                 psi_AB, envs_AB, psi_BA, envs_BA;
-                                 sector=spinon_charge, num=1);
-
-holon_charge = FermionParity(1) ⊠ U1Irrep(-1) ⊠ SU2Irrep(0)
-E_holon, ϕ_holon = excitations(H_u1_su2, alg, momenta,
-                               psi_AB, envs_AB, psi_BA, envs_BA;
-                               sector=holon_charge, num=1);
-
-md"""
-Again, we can compare the numerical results to the analytic solution.
-Here, the formulae for the excitation energies are expressed in terms of dressed momenta:
-"""
-
-function spinon_momentum(Λ, u; rtol=1e-12)
-    integrandum(ω) = besselj0(ω) * sin(ω * Λ) / ω / cosh(ω * u)
-    return π / 2 - quadgk(integrandum, 0, Inf; rtol=rtol)[1]
-end
-function spinon_energy(Λ, u; rtol=1e-12)
-    integrandum(ω) = besselj1(ω) * cos(ω * Λ) / ω / cosh(ω * u)
-    return 2 * quadgk(integrandum, 0, Inf; rtol=rtol)[1]
+    return iMPS
 end
 
-function holon_momentum(k, u; rtol=1e-12)
-    integrandum(ω) = besselj0(ω) * sin(ω * sin(k)) / ω / (1 + exp(2u * abs(ω)))
-    return π / 2 - k - 2 * quadgk(integrandum, 0, Inf; rtol=rtol)[1]
-end
-function holon_energy(k, u; rtol=1e-12)
-    integrandum(ω) = besselj1(ω) * cos(ω * sin(k)) * exp(-ω * u) / ω / cosh(ω * u)
-    return 2 * cos(k) + 2u + 2 * quadgk(integrandum, 0, Inf; rtol=rtol)[1]
-end
 
-Λs = range(-10, 10; length=51)
-P_spinon_analytic = rem2pi.(spinon_momentum.(Λs, U / 4), RoundNearest)
-E_spinon_analytic = spinon_energy.(Λs, U / 4)
-I_spinon = sortperm(P_spinon_analytic)
-P_spinon_analytic = P_spinon_analytic[I_spinon]
-E_spinon_analytic = E_spinon_analytic[I_spinon]
-P_spinon_analytic = [reverse(-P_spinon_analytic); P_spinon_analytic]
-E_spinon_analytic = [reverse(E_spinon_analytic); E_spinon_analytic];
+# ST ORDERING, EXPLAIN
+function ST_indexing(pos::Int64, N::Int64)
 
-ks = range(0, 2π; length=51)
-P_holon_analytic = rem2pi.(holon_momentum.(ks, U / 4), RoundNearest)
-E_holon_analytic = holon_energy.(ks, U / 4)
-I_holon = sortperm(P_holon_analytic)
-P_holon_analytic = P_holon_analytic[I_holon]
-E_holon_analytic = E_holon_analytic[I_holon];
+    if mod(N,2) == 1
+        ST_index = mod1(2*pos - 1, N)
 
-p = let p_excitations = plot(; xaxis="momentum", yaxis="energy")
-    scatter!(p_excitations, momenta, real(E_spinon); label="spinon")
-    plot!(p_excitations, P_spinon_analytic, E_spinon_analytic; label="spinon (analytic)")
+    # If pos is in an even site, considering ST starts in an odd site:
+    elseif pos > Int64(N/2)
+        ST_index = mod1(2*pos, N)
+    else
+        ST_index = mod1(1 + 2*(pos - 1), N)
+    end
 
-    scatter!(p_excitations, momenta, real(E_holon); label="holon")
-    plot!(p_excitations, P_holon_analytic, E_holon_analytic; label="holon (analytic)")
-
-    p_excitations
+    return ST_index
 end
 
-md"""
-The plot shows some discrepancies between the numerical and analytic results.
-First and foremost, we must realize that in the thermodynamic limit, the momentum of a domain wall is actually not well-defined.
-Concretely, only the difference in momentum between the two groundstates is well-defined, as we can always shift the momentum by multiplying one of the groundstates by a phase.
-Here, we can fix this shift by realizing that our choice of shifting the groundstates by a single site, differs from the formula by a factor ``\pi/2``.
-"""
 
-momenta_shifted = rem2pi.(momenta .- π / 2, RoundNearest)
-p = let p_excitations = plot(; xaxis="momentum", yaxis="energy", xlims=(-π, π))
-    scatter!(p_excitations, momenta_shifted, real(E_spinon); label="spinon")
-    plot!(p_excitations, P_spinon_analytic, E_spinon_analytic; label="spinon (analytic)")
+# Generates a vector of Suzuki-Trotter gates for a Hubbard Hamiltonian
+function gen_gates(N::Int64, sites::Vector{Index{Int64}}, dtau::Float64; secondorder = true)
 
-    scatter!(p_excitations, momenta_shifted, real(E_holon); label="holon")
-    plot!(p_excitations, P_holon_analytic, E_holon_analytic; label="holon (analytic)")
+    gates = [ITensor() for _ in 1:N] # Define gates as an empty Vector{ITensor}
+    
+    for i in 1:N
 
-    p_excitations
+        # Periodic boundary conditions.  The original code had mod1 here, which is correct
+        # for a *periodic* system.  However, the main part of the code was setting up an
+        # *open* system.  I've changed this to i+1, and added a check to prevent indexing
+        # beyond the end of the sites array.
+        iplusone = (i < N) ? i + 1 : 1
+
+        # h = get_operator("TunnellingUP", sites, i)
+        h = op("Cup", sites[i]) * op("Cdagup", sites[iplusone])
+        h += op("Cdagup", sites[i]) * op("Cup", sites[iplusone])
+        h *= -1
+
+        # Second-order ST ordering: dτ is divided by two for odd gates, which will be applied twice
+        if secondorder
+            if isodd(i)
+                gate = exp(-dtau / 2 * h)
+            else
+                gate = exp(-dtau * h)
+            end
+        else
+            gate = exp(-dtau * h)
+        end
+        #println(inds(gate))
+
+        gates[i] = gate 
+    end
+
+    return gates
 end
 
-md"""
-The second discrepancy is that while the spinon dispersion is well-reproduced, the holon dispersion is not.
-This is due to the fact that the excitation ansatz captures the lowest-energy excitation, and not the elementary single-particle excitation.
-To make this explicit, we can consider the scattering states comprising of a holon and two spinons.
-If these are truly scattering states, the energy of the scattering state should be the sum of the energies of the individual excitations, and the momentum is the sum of the momenta.
-Thus, we can find the lowest-energy scattering states by minimizing the energy over the combination of momenta for the constituent elementary excitations.
-"""
 
-holon_dispersion_itp = linear_interpolation(P_holon_analytic, E_holon_analytic;
-                                            extrapolation_bc=Line())
-spinon_dispersion_itp = linear_interpolation(P_spinon_analytic, E_spinon_analytic;
-                                             extrapolation_bc=Line())
-function scattering_energy(p1, p2, p3)
-    p1, p2, p3 = rem2pi.((p1, p2, p3), RoundNearest)
-    return holon_dispersion_itp(p1) + spinon_dispersion_itp(p2) + spinon_dispersion_itp(p3)
-end;
+# Applies a two-site gate to an iMPS of type Vector{ITensor}, and returns the split iMPS sites
+function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-20, maxdim = 30)
 
-E_scattering_min = map(momenta_shifted) do p
-    e = Inf
-    for i in 1:10 # repeat for stability
-        res = optimize((rand(2) .* (2π) .- π)) do (p₁, p₂)
-            p₃ = p - p₁ - p₂
-            return scattering_energy(p₁, p₂, p₃)
+    # Check for double index connection: this is the case of a looped two-site unit cell iMPS
+    l1, p1, r1 = inds(site1)
+    l2, p2, r2 = inds(site2)
+
+    #println("SITE1: ", inds(site1))
+    #println("SITE2: ", inds(site2))
+
+    # Prime leftmost internal index to prevent double contractions
+    prime!(site1, l1)
+
+    # If the double connection is given, one of the lateral indices is primed to avoid double contractions
+    #if (l1 == r2) && (r1 == l2)
+    #   println("caca aqui")
+    #   prime!(site1, l1)
+    #end
+
+    # Contract the site at pos with the next one, two-site gate
+    prodsite = site1 * site2
+
+    # Contract the joint site with the two-site operator
+    prodsite_evol = gate * prodsite
+    #println("123", inds(prodsite_evol))
+
+    # Define combiner tensors for left and right sides: this will help switch prodsite_evol
+    # from a D,d,d,D indexed tensor to a D*d, D*d tensor, enabling SVD
+    i1, i2, i3, i4 = inds(prodsite_evol)
+    cleft = combiner(i1, i3)
+    cright = combiner(i2, i4)
+
+    # Apply combiners, making prodsite_matrix a D*d, D*d tensor
+    prodsite_matrix = prodsite_evol * cleft
+    prodsite_matrix *= cright
+
+    # Perform SVD
+    U, S, V = svd(prodsite_matrix, inds(prodsite_matrix)[1]; cutoff = cutoff, maxdim = maxdim) # Added cutoff
+
+    # diagonal_array = [S[inds(S)[1]=>i, inds(S)[2]=>i] for i in 1:size(S)[1]]
+    
+    # Compute square root matrix
+    sqS = copy(S)
+    for k in 1:size(S)[1]
+        sqS[inds(sqS)[1]=>k, inds(sqS)[2]=>k] = sqrt( S[inds(S)[1]=>k, inds(S)[2]=>k] )
+    end
+
+    # We have separated S into its two factors, (√S)^2=S: it's a simple operation that can be
+    # performed element-wise since we know that S is diagonal and its elements are real.
+    # However the two √S matrices that will be absorbed into U and S respectively need to be
+    # explicitly connected by a shared index, which will be the link between site1 and site2
+    sql = copy(sqS)
+    sqr = copy(sqS)
+    # Replace the sql right index with the site1-site2 internal index
+    replaceindex!(sql, inds(sql)[2], r1)
+    replaceindex!(sqr, inds(sqr)[1], r1)
+    
+    # Finally form and reshape the new site tensors, of indices D,d,D
+    #println("inds U: ", inds(U))
+    #println("inds sql: ", inds(sql))
+    #println("inds cleft: ", inds(cleft))
+    L = U * sql * dag(cleft)
+    R = sqr * V * dag(cright)
+    
+    L = permute(L, p1, l1, r1) # Changed the order of indices to match
+    L = noprime(L)
+    R = noprime(R)
+    #println("Indexos de L: ", inds(L))
+    #println("Indexos de R: ", inds(R), "\n")
+
+    # Return updated sites
+    return L, R
+end
+
+
+# Applies a Suzuki-Trotter step to an MPS
+function ST_step(iMPS::Vector{ITensor}, gates::Vector{ITensor}; secondorder = true, maxdim = 30, cutoff = 1e-20) # Added cutoff
+
+    N = length(iMPS)
+
+    # Odd sites
+    for i in 1:N
+        if isodd(i)
+            iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim, cutoff = cutoff) # Added cutoff
+        end
+    end
+    
+    # Even sites
+    for i in 1:N
+        if iseven(i)
+            iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim, cutoff = cutoff) # Added cutoff
+        end
+    end
+    
+    # In second-order ST evolution odd gates are applied again
+    if secondorder
+        for i in 1:N
+            if isodd(i)
+                iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim, cutoff = cutoff) # Added cutoff
+            end
+        end
+    end
+
+    return iMPS
+end
+
+
+# Returns the matrix of a given jth-site operator, commonly used in this work
+function get_operator(name::String, sites::Vector{Index{Int64}}, site::Int64; t = 1.0, U = 0.0, μ = 0.0)
+
+    N = length(sites)
+    nsite = mod1(site + 1, N) # Index of next site
+
+    if name == "TunnellingUP"
+        operator = op("Cdagup", sites[site]) * op("Cup", sites[nsite])
+        operator += op("Cup", sites[site]) * op("Cdagup", sites[nsite])
+        operator *= -t
+
+    elseif name == "TunnellingDOWN"
+        operator = op("Cdagdn", sites[site]) * op("Cdn", sites[nsite])
+        operator += op("Cdn", sites[site]) * op("Cdagdn", sites[nsite])
+        operator *= -t
+
+    elseif name == "Tunnelling"
+        operator = op("Cdagup", sites[site]) * op("Cup", sites[nsite])
+        operator += op("Cup", sites[site]) * op("Cdagup", sites[nsite])
+        operator += op("Cdagdn", sites[site]) * op("Cdn", sites[nsite])
+        operator += op("Cdn", sites[site]) * op("Cdagdn", sites[nsite])
+        operator *= -t
+    
+    elseif name == "Onsite"
+        operator = -U * op("Nupdn", sites[site])
+
+    elseif name == "ChemPot"
+        operator = -μ * op("Ntot", sites[site])
+    
+    elseif name == "Hubbard"
+        operator = op("Cdagup", sites[site])*op("Cup", sites[nsite])
+        operator += op("Cup", sites[site])*op("Cdagup", sites[nsite])
+        operator += op("Cdagdn", sites[site])*op("Cdn", sites[nsite])
+        operator += op("Cdn", sites[site])*op("Cdagdn", sites[nsite])
+        operator *= -t
+        operator += -U * op("Nupdn", sites[site])
+    
+    else
+        error("\n\n No operator identified with the following name: ", name)
+        #throw(InterruptException())
+    end
+
+    return operator
+end
+
+
+# Returns the expected value of a given operator for an iMPS made of Vector{ITensor}
+# Works for operators of any size
+# Computes the expected value of an operator in an iMPS Vector{ITensor} object
+function imps_expect2(iMPS::Vector{ITensor}, operator::ITensor, site::Int64)
+
+    # Find number of sites the operator acts on
+    s = Int64(length(size(operator))/2)
+    #print("\n\t> S = ", s, "\n")
+
+    N = length(iMPS)
+
+    site_tensor = iMPS[site]
+
+    # If the operator is of more than one site, absorb the (s-1) following sites into 
+    # a single tensor that can be multiplied by the operator
+    if s > 1
+        for i in 1:(s-1)
+            site_tensor *= iMPS[mod1(site + i, N)]
+        end
+    end
+
+
+    # Apply operator gate to sites of interest to create a tensor of dimension D,D,D,D
+    applied_tosite = site_tensor' * operator * site_tensor # Corrected order of multiplication
+
+    # Now a new Vector{ITensor} object is created of length N-(s-1), where s
+    # is the number of sites the operator acts upon. In one of its positions
+    # the object calculated above will be saved, and in the others the contractions
+    # of the sites at both MPS sites (site' * site) will be stored. Finally the
+    # whole iMPS will be contracted vertically
+    cont_iMPS = [ITensor() for _ in 1:(N - (s - 1))]
+
+    # We save the applied_tosite tensor to the first position of cont_iMPS
+    # We don't need to preserve the position of the original iMPS, just the order.
+    # cont_iMPS will store first the applied_tosite tensor and then the following
+    # iMPS symmetrical sites, contracted, ordered by looping over all the iMPS from the
+    # site immediately below the contracted operator up to the one immediately above the
+    # site entered as an argument in this function
+    cont_iMPS[1] = applied_tosite
+
+    # For each position of this new vector that is not storing the tensor <ϕi|O|ϕi>:
+    for item in 1:N-s
+        # Set the cursor at position pos: the site acted upon + 1 + (s-1) (sites absorbed by multisite operator)
+        pos = mod1(site + item + (s-1), N)
+        pos_cont = mod1(item + 1, N - (s-1))
+        indsite = "Electron,Site,n="*string(pos) # Physical index tag at given site to unprime
+
+        # Contract symmetric iMPS sites upon which no operator acted and store at pos
+        cont_iMPS[pos_cont] = noprime(iMPS[pos]', indsite) * iMPS[pos]
+    end
+
+    # Contract rest of iMPS
+    expect = cont_iMPS[1] # Any position is valid: all indices are connected and will be contracted
+    for i in 2:(N - (s-1))
+        expect *= cont_iMPS[i]
+    end
+
+    return scalar(expect) # Return a scalar
+end
+
+
+# Canonicalises and normalises the iMPS
+
+
+# DONE
+function normalise_unitcell(unitcell::Vector{ITensor})
+
+    # Get transfer matrix
+    tf_matrix = transfermatrix(unitcell)
+    linds, rinds = inds(tf_matrix)
+
+
+    # Diagonalise
+    eigenvals, eigenvecs = eigen(tf_matrix, linds, rinds)
+
+    # Get dominant eigenvalue
+    dominant_eigenvalue = maximum(abs, eigenvals)
+
+    # Normalise
+    N = length(unitcell)
+    normal_unitcell = unitcell / sqrt(dominant_eigenvalue^(1/N))
+
+    return normal_unitcell#, dominant_eigenvalue
+end
+
+
+
+# DONE?
+function imps_expect(unitcell::Vector{ITensor}, operator::ITensor; tolerance = 1e-8)
+
+    N = length(unitcell)
+
+    # Define lateralmost indices
+    lind = inds(unitcell[1])[1]
+    rind = inds(unitcell[N])[3]
+
+    tfmatrix = transfermatrix(unitcell)
+    # println("Tf matrix type: ", typeof(tfmatrix), inds(tfmatrix))
+
+    lenv = lateral_env(tfmatrix, tolerance, lind)
+    renv = lateral_env(tfmatrix, tolerance, rind; left = false)
+
+    # Contract iMPS cells
+    A = unitcell[1]
+    for i in 2:N
+        A *= unitcell[i]
+    end
+
+    Adag = prime(dag(A))
+
+    # println("A initial indices: ", inds(A))
+    # println("Operator indices: ", inds(operator))
+
+    # Compute A adjoint
+    # Aadj = 
+
+    # Contract R into A
+    A = A * renv # Changed order
+    # println("AR indices: ", inds(A))
+
+    # Contract At into RA
+    A = Adag * A # Changed order
+    # println("AtRA indices: ", inds(A))
+
+    # Contract operator into AtRA
+    A = operator * A # Changed order
+    #println("AtRA + operator indices: ", inds(A))
+
+    # Contract L into final tensor, scalar result
+    A = lenv * A # Changed order
+
+    #error("Parem per ara")
+    # Return observable
+    return scalar(A)
+end
+
+
+# DONE
+function transfermatrix(unitcell::Vector{ITensor})
+
+    N = length(unitcell)
+    
+    # Contract over internal indices
+    transfer_tensor = unitcell[1]
+    for i in 2:N
+        transfer_tensor *= unitcell[i]
+    end
+
+    #println("First tf tensor indices: ", inds(transfer_tensor))
+
+    # Contract over physical indices. We prime lateral indices to avoid accidental contraction
+    lower_tftensor = copy(transfer_tensor)
+
+    ## Lateral virtual index identification
+    lind = inds(unitcell[1])[1]
+    rind = inds(unitcell[N])[3]
+
+    prime!(lower_tftensor, lind, rind)
+    # println("Mirror tf tensor indices: ", inds(lower_tftensor))
+
+    # Contraction over all physical indices at once
+    transfer_tensor *= dag(prime(lower_tftensor, siteinds(unitcell))) # Corrected this line
+
+    # Reshape transfer tensor to matrix
+    # println("Transfer tensor indices: ", inds(transfer_tensor), "\n")
+    i1, i2, i3, i4 = inds(transfer_tensor)
+    cleft = combiner(i1, i3)
+    cright = combiner(i2, i4)
+
+    return transfer_tensor * cleft * cright
+end
+
+
+# FIRST ATTEMPT: iterative method
+function lateral_env(transfermatrix::ITensor, tolerance::Float64, lateralind::Index{Int64}; left = true)
+
+    l, r = inds(transfermatrix)
+
+    if left
+        connect = l
+        other = r
+    else
+        connect = r
+        other = l
+    end
+
+    lvec = randomITensor(connect)
+    lvec_prev = randomITensor(connect)
+
+    while (norm(lvec - lvec_prev) > tolerance)
+        lvec_prev = lvec
+        lvec = transfermatrix * lvec # Changed order
+
+        lvec /= norm(lvec)
+
+        lvec = replaceinds(lvec, (other => connect))
+    end
+
+    separator = combiner(lateralind, prime(lateralind))
+    separator = replaceinds(separator, (inds(separator)[1] => connect))
+
+    lenv = lvec * separator
+
+    return lenv
+end
+
+
+function loop_iMPS(unitcell::Vector{ITensor})
+
+    N = length(unitcell)
+
+    # Get lateral indices
+    l1, p1, r1 = inds(unitcell[1])
+    ln, pn, rn = inds(unitcell[N])
+
+    replaceinds!(unitcell[1], (l1 => rn))
+
+    return unitcell
+end
+
+
+function unloop_iMPS(unitcell::Vector{ITensor}, leftindex::Index{Int64})
+
+    # Get first cell indices
+    rn, p1, r1 = inds(unitcell[1])
+
+    replaceinds!(unitcell[1], (rn => leftindex))
+
+    return unitcell
+end
+
+
+
+
+
+# Example usage:
+# Assume you have a Vector{ITensor} called 'my_sites'
+# my_normalized_sites = normalize_mps!(deepcopy(my_sites))
+
+
+# Computes the Von Neumann entropy of an iMPS at a given site
+function site_entropy(iMPS::Vector{ITensor}, site::Int64)
+
+    
+
+    entropy = 0
+
+
+    return entropy
+end
+
+
+
+
+let 
+    # 
+    N = 5 # Changed to 5 for this example
+    bdim = 16
+    sites = siteinds("Electron", N)
+    links = [Index(bdim, "link-$i") for i in 0:N]
+
+    # Create an iMPS with a known initial state
+    psi = init_iMPS(N, sites, links)
+    #print(typeof(sites), "\n")
+    psi = set_FHstate(psi, sites, links, [0,1,0,0,0]) # Corrected state vector length
+
+    # Define simulation parameters
+    U = 0.0
+    μ = 0.0
+    
+    # iTEBD parameters, gates and operator
+    cutoff = 1e-5
+    dtau = 0.01
+    steps = 100
+    checkevery = 10
+    framespersecond = 6
+
+    mesures = []
+    #println("PRINCIPI ", inds(psi[1]))
+
+    # Generate iTEBD gates
+    secondorder_STgates = gen_gates(N, sites, dtau)
+
+    # Prepare iMPS to apply iTEBD
+    psi = loop_iMPS(psi)
+
+    anim = Animation() # Define anim here
+
+    # Begin iTEBD loop
+    for step in 1:steps
+
+        println("Step ", step, " of ", steps)
+        
+        # Evolve the system using iTEBD, second-order Suzuki-Trotter gate ordering:
+        # First (square-rooted) odd gates are applied, then even, then odd gates again
+        # The functions gen_gates and secondorder_STstep defined in the file "functions.jl"
+        # implement this automatically, generating an array in which the gates are well-ordered
+        psi = ST_step(psi, secondorder_STgates, maxdim = bdim, cutoff = cutoff) # Added cutoff
+
+        # Un-loop iMPS
+        psi = unloop_iMPS(psi, links[1])
+
+        # Normalise iMPS
+        psi = normalise_unitcell(psi)
+
+        # Re-loop iMPS
+        psi = loop_iMPS(psi)
+
+
+        if mod(step, checkevery) == 0
+
+            # Unloop iMPS to compute expectation values
+            psi = unloop_iMPS(psi, links[1])
+            
+            # Measure density profile
+            density = zeros(N)
+            for pos in 1:N
+                site_density = op("Nup", sites[pos])
+                density[pos] = imps_expect(psi, site_density) # Corrected the call to imps_expect
+            end
+
+            plot(density, ylims = (0,1), legend=false, title="Iteration = $step")
+            frame(anim)
+
+            # Re-loop iMPS to continue iTEBD
+            psi = loop_iMPS(psi)
+
         end
 
-        e = min(Optim.minimum(res), e)
+
     end
-    return e
-end
-E_scattering_max = map(momenta_shifted) do p
-    e = -Inf
-    for i in 1:10 # repeat for stability
-        res = optimize((rand(Float64, 2) .* (2π) .- π)) do (p₁, p₂)
-            p₃ = p - p₁ - p₂
-            return -scattering_energy(p₁, p₂, p₃)
-        end
 
-        e = max(-Optim.minimum(res), e)
-    end
-    return e
-end;
 
-p = let p_excitations = plot(; xaxis="momentum", yaxis="energy", xlims=(-π, π),
-                             ylims=(-0.1, 5))
-    scatter!(p_excitations, momenta_shifted, real(E_spinon); label="spinon")
-    plot!(p_excitations, P_spinon_analytic, E_spinon_analytic; label="spinon (analytic)")
 
-    scatter!(p_excitations, momenta_shifted, real(E_holon); label="holon")
-    plot!(p_excitations, P_holon_analytic, E_holon_analytic; label="holon (analytic)")
+    #j = 1
+    #gate1 = op("Ntot", sites[j])
+    #expect2 = scalar(imps_expect(psi, gate1, j))
+    #expect2 = imps_expect(psi, gate1, 2)
+    #print("Escalar final = ", expect2, "\n")
+    #print("Escalar final = ", inds(expect2), "\n")
+    #print()
 
-    I = sortperm(momenta_shifted)
-    plot!(p_excitations, momenta_shifted[I], E_scattering_min[I]; label="scattering states",
-          fillrange=E_scattering_max[I], fillalpha=0.3, fillstyle=:x)
+    # Observable measurement
+    #n = expect(psi, "Nup")
 
-    p_excitations
+    # Generate density plot
+    #plot(n, ylimits = (0, 1))
+    #savefig("density_1part.png")
+
+    # Generate iTEBD animation
+    gif(anim, "1part_evol.gif", fps=framespersecond)
+
+    # Generate energy evolution plot
+    #plot(energies, yformatter = :scientific, ylimits=(-1e-15, 1e-15))
+    #savefig("energy_evol_itebd.png")
+
 end
