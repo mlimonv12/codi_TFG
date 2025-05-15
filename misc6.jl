@@ -109,16 +109,36 @@ function contract_full_iMPS(psi::Vector{ITensor}; central = 1)
 end
 
 
+prova1 = randomITensor(links[1], links[2])
 
+U, S, V = svd(prova1, links[1])
 
+S *= 2
+println(size(S))
 
-psi, sites, links = init_iMPS([1,2])
+# Per normalitzar:
+#S /= norm(S)
+mida = Int(size(S)[1])
+S_Lind, S_Rind = inds(S)
 
-contracted_iMPS, lateral_clone = contract_full_iMPS(psi, central = 1)
-#caca1 = contract_full_iMPS(psi, central = 1)
+sumatot1 = 0.0
+for k in 1:mida
+    sumatot1 += S[S_Lind=>k, S_Rind=>k]^2
+end
 
+println(sumatot)
 
-println("Inds iMPS at given site: ", inds(psi[1]))
-println("Inds iMPS at given site: ", inds(psi[4]))
-println("Inds theta: ", inds(contracted_iMPS))
-println("Inds latclone: ", inds(lateral_clone))
+S /= sqrt(sumatot1)
+sumatot = 0.0
+
+for k in 1:mida
+    sumatot += S[S_Lind=>k, S_Rind=>k]^2
+end
+
+println("Sumatot = ", sumatot)
+
+S[S_Lind=>1, S_Rind=>1] = 2
+
+Sinv = inv_diagonal(S)
+
+println("Prova1 = ", S * Sinv)

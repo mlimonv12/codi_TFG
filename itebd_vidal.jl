@@ -61,8 +61,8 @@ end
 
 function normalise_unitcell(unitcell::Vector{ITensor})
 
-    unitcell[1] /= norm(unitcell[1])
-    unitcell[3] /= norm(unitcell[3])
+    normalise_diagonal!(unitcell[1])
+    normalise_diagonal!(unitcell[3])
     # unitcell[5] = unitcell[1]
 
     return unitcell
@@ -98,6 +98,21 @@ function gen_gates(sites::Vector{Index{Int64}}, dtau::Float64, operator::String;
     end
 
     return gates
+end
+
+
+# Normalises a square diagonal two-index tensor
+function normalise_diagonal!(S::ITensor)
+
+    mida = Int(size(S)[1])
+    S_Lind, S_Rind = inds(S)
+
+    sumatot = 0.0
+    for k in 1:mida
+        sumatot += S[S_Lind=>k, S_Rind=>k]^2
+    end
+
+    return S / sqrt(sumatot)
 end
 
 
@@ -171,7 +186,7 @@ function apply_gate(unitcell::Vector{ITensor}, gate::ITensor; odd = true, cutoff
     
     # S will be saved as the new central Λ matrix between these two tensors
     # This is where we can normalize the iMPS!
-    S /= norm(S)
+    normalise_diagonal!(S)
     S_Lind, S_Rind = inds(S)
     unitcell[mod1(site_ind + 1, 4)] = replaceinds(S, (S_Lind => r1, S_Rind => l2))
 
