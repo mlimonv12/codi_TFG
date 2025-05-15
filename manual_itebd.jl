@@ -4,6 +4,7 @@ gr()
 
 #include("functions.jl")
 anim = Animation()
+anim2 = Animation()
 
 
 
@@ -57,7 +58,6 @@ function set_FHstate(iMPS::Vector{ITensor}, sites::Vector, links::Vector, state:
     references = Dict(0=>"Emp", 1=>"Up", 2=>"Dn", 3=>"UpDn")
 
     for i in 1:N
-        #print("AAA", typeof(state[i]), "\n")
         T = ITensor(links[i], sites[i], links[i+1])
         T[links[i]=>bdim, sites[i]=>references[state[i]], links[i+1]=>bdim] = 1.0
         iMPS[i] = T
@@ -86,21 +86,26 @@ end
 
 
 # Generates a vector of Suzuki-Trotter gates for a Hubbard Hamiltonian
-function gen_gates(sites::Vector{Index{Int64}}, dtau::Float64; secondorder = true)
+function gen_gates(sites::Vector{Index{Int64}}, dtau::Float64, operator::String; secondorder = true, U = 0.0, μ = 0.0, finite = false)
 
     N = length(sites)
     gates = [ITensor() for _ in 1:N] # Define gates as an empty Vector{ITensor}
+
+    if finite
+        N += -1
+    end
     
     for i in 1:N
 
         # Periodic boundary conditions
         #iplusone = mod1(i+1, N)
 
-        h = get_operator("Onsite", sites, i) + get_operator("TunnellingDOWN", sites, i)
+        h = get_operator(operator, sites, i; U = U, μ = μ)
+        #h = get_operator("Onsite", sites, i) + get_operator("TunnellingDOWN", sites, i)
         #h = get_operator("Hubbard", sites, i)
 
         # Second-order ST ordering: dτ is divided by two for odd gates, which will be applied twice
-        if secondorder
+        if secondorder && !finite
             if isodd(i)
                 gate = exp(-dtau / 2 * h)
             else
@@ -118,8 +123,32 @@ function gen_gates(sites::Vector{Index{Int64}}, dtau::Float64; secondorder = tru
 end
 
 
+
+
+
+function gg_test(sites::Vector{Index{Int64}}, dtau::Float64, operator::String)
+
+
+    gates = [ITensor()]
+
+    #N = length(sites) - 1
+    #gates = [ITensor() for _ in 1:N] # Define gates as an empty Vector{ITensor}
+
+    h = get_operator(operator, sites, 1)
+    #h = get_operator("Onsite", sites, i) + get_operator("TunnellingDOWN", sites, i)
+    #h = get_operator("Hubbard", sites, i)
+
+    gate = exp(-dtau * h)
+
+    gates[1] = gate
+
+    return gates
+end
+
+
+
 # Applies a two-site gate to an iMPS of type Vector{ITensor}, and returns the split iMPS sites
-function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-10, maxdim = 30)
+function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-10, maxdim = 30, plot_coeffs = false, step=1)
 
     # Check for double index connection: this is the case of a looped two-site unit cell iMPS
     l1, p1, r1 = inds(site1)
@@ -131,18 +160,12 @@ function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-1
     # Prime leftmost internal index to prevent double contractions
     prime!(site1, l1)
 
-    # If the double connection is given, one of the lateral indices is primed to avoid double contractions
-    #if (l1 == r2) && (r1 == l2)
-    #    println("caca aqui")
-    #    prime!(site1, l1)
-    #end
-
     # Contract the site at pos with the next one, two-site gate
     prodsite = site1 * site2
 
     # Contract the joint site with the two-site operator
     prodsite_evol = gate * prodsite
-    #println("123", inds(prodsite_evol))
+    # println("Inds prodsite evol: ", inds(prodsite_evol))
 
     # Define combiner tensors for left and right sides: this will help switch prodsite_evol
     # from a D,d,d,D indexed tensor to a D*d, D*d tensor, enabling SVD
@@ -154,9 +177,63 @@ function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-1
     prodsite_matrix = prodsite_evol * cleft
     prodsite_matrix *= cright
 
+    L, R = simple_update(prodsite_matrix, cleft, cright, r1, maxdim = maxdim)
+
+    return L, R
+    #return prodsite_matrix, cleft, cright
+end
+
+
+# Applies a Suzuki-Trotter step to an iMPS, returns the prodsite matrix to spare the contraction
+# for expectation value computation
+function ST_step(iMPS::Vector{ITensor}, gates::Vector{ITensor}; secondorder = true, maxdim = 30, cutoff = 1e-10, step = 1, plot_coeffs = true, finite = false)
+
+    N = length(iMPS)
+    ngates = N
+
+    if finite == true
+        ngates += -1
+    end
+
+    # Odd sites
+    for i in 1:ngates
+        if isodd(i)
+            iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim, cutoff = cutoff)
+            #prodsite_matrix, cleft, cright = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim, cutoff = cutoff)
+            #iMPS[i], iMPS[mod1(i+1, N)] = simple_update(prodsite_matrix, cleft, cright, maxdim)
+        end
+    end
+    
+    # Even sites
+    for i in 1:ngates
+        if iseven(i)
+            iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim, cutoff = cutoff)
+            #prodsite_matrix, cleft, cright = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim, cutoff = cutoff)
+            #iMPS[i], iMPS[mod1(i+1, N)] = simple_update(prodsite_matrix, cleft, cright, maxdim)
+        end
+    end
+    
+    # In second-order ST evolution odd gates are applied again
+    if secondorder
+        for i in 1:ngates
+            if isodd(i)
+                iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim, cutoff = cutoff)
+                #prodsite_matrix, cleft, cright = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim, cutoff = cutoff)
+                #iMPS[i], iMPS[mod1(i+1, N)] = simple_update(prodsite_matrix, cleft, cright, maxdim)
+            end
+        end
+    end
+
+    return iMPS
+end
+
+
+
+
+function simple_update(prodsite_matrix::ITensor, cleft::ITensor, cright::ITensor, r1::Index{Int64}; maxdim = 20, plot_coeffs = false)
+
     # Perform SVD
     U, S, V = svd(prodsite_matrix, inds(prodsite_matrix)[1]; maxdim = maxdim)#, cutoff = cutoff)
-    #println("INDS S: ", inds(S))
 
     # diagonal_array = [S[inds(S)[1]=>i, inds(S)[2]=>i] for i in 1:size(S)[1]]
     
@@ -165,6 +242,13 @@ function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-1
     for k in 1:size(S)[1]
         sqS[inds(sqS)[1]=>k, inds(sqS)[2]=>k] = sqrt( S[inds(S)[1]=>k, inds(S)[2]=>k] )
     end
+
+    # Plot correlations
+    if plot_coeffs
+        plot(diag(dense(S)), xlim=(1,maxdim), ylim=(0,2), legend=false, title="Valors singulars de S a la iteració $step", lc=:green, linewidth=3)
+        frame(anim2)
+    end
+
 
     # We have separated S into its two factors, (√S)^2=S: it's a simple operation that can be
     # performed element-wise since we know that S is diagonal and its elements are real.
@@ -177,9 +261,6 @@ function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-1
     replaceindex!(sqr, inds(sqr)[1], r1)
     
     # Finally form and reshape the new site tensors, of indices D,d,D
-    #println("inds U: ", inds(U))
-    #println("inds sql: ", inds(sql))
-    #println("inds cleft: ", inds(cleft))
     L = U * sql * dag(cleft)
     R = sqr * V * dag(cright)
     
@@ -194,40 +275,24 @@ function apply_gate(site1::ITensor, site2::ITensor, gate::ITensor; cutoff = 1e-1
 end
 
 
-# Applies a Suzuki-Trotter step to an MPS
-function ST_step(iMPS::Vector{ITensor}, gates::Vector{ITensor}; secondorder = true, maxdim = 30, cutoff = 1e-10)
 
-    N = length(iMPS)
+# OVERRIDE: TEST iTEBD
+function ST_stepTEST(iMPS::Vector{ITensor}, gates::Vector{ITensor}; secondorder = true, maxdim = 30, cutoff = 1e-10, step = 1, mcorr = false)
 
-    # Odd sites
-    for i in 1:N
-        if isodd(i)
-            iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim, cutoff = cutoff)
-        end
-    end
-    
-    # Even sites
-    for i in 1:N
-        if iseven(i)
-            iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim, cutoff = cutoff)
-        end
-    end
-    
-    # In second-order ST evolution odd gates are applied again
-    if secondorder
-        for i in 1:N
-            if isodd(i)
-                iMPS[i], iMPS[mod1(i+1, N)] = apply_gate(iMPS[i], iMPS[mod1(i+1, N)], gates[i], maxdim = maxdim, cutoff = cutoff)
-            end
-        end
+    N = length(iMPS) - 1
+
+    for k in 1:N
+        iMPS[k], iMPS[k+1] = apply_gate(iMPS[k], iMPS[k+1], gates[k], maxdim = maxdim, cutoff = cutoff, plot_coeffs = mcorr, step = step)
     end
 
     return iMPS
 end
 
 
+
+
 # Returns the matrix of a given jth-site operator, commonly used in this work
-function get_operator(name::String, sites::Vector{Index{Int64}}, site::Int64; t = 1.0, U = -4.0, μ = 0.0)
+function get_operator(name::String, sites::Vector{Index{Int64}}, site::Int64; t = 1.0, U = 1.0, μ = 0.0)
 
     N = length(sites)
     nextsite = mod1(site + 1, N) # Index of next site
@@ -257,12 +322,14 @@ function get_operator(name::String, sites::Vector{Index{Int64}}, site::Int64; t 
     
     elseif name == "Hubbard"
         operator = get_operator("Tunnelling", sites, site)
+        #operator2 = U * op("Nupdn", sites[site])
         operator += U * op("Nupdn", sites[site]) * op("Id", sites[nextsite])
+        operator += U * op("Id", sites[site]) * op("Nupdn", sites[nextsite])
     
     elseif name == "GCHubbard"
         operator = get_operator("Tunnelling", sites, site)
-        #operator += U * op("Nupdn", sites[site]) * op("Id", sites[nextsite])
-        #operator += -μ * op("Ntot", sites[site]) * op("Id", sites[nextsite])
+        operator += U * op("Nupdn", sites[site]) * op("Id", sites[nextsite])
+        operator += -μ * op("Ntot", sites[site]) * op("Id", sites[nextsite])
     
     else
         error("\n\n No operator identified with the following name: ", name)
@@ -524,7 +591,7 @@ function lateral_env(transfermatrix::ITensor, tolerance::Float64, lateralind::In
         end
     end
 
-    println("Computed lateral vector in ", counter, " iterations")
+    #println("Computed lateral vector in ", counter, " iterations")
     separator = combiner(lateralind, prime(lateralind))
     separator = replaceinds(separator, (inds(separator)[1] => connect))
 
@@ -583,34 +650,40 @@ end
 
 let 
     # 
-    N = 3
+    N = 2
     bdim = 16
     sites = siteinds("Electron", N)
     links = [Index(bdim, "link-$i") for i in 0:N]
 
     # Create an iMPS with a known initial state
     psi = init_iMPS(N, sites, links)
-    #print(typeof(sites), "\n")
-    psi = set_FHstate(psi, sites, links, [0,1,0,0,0])
+    psi = set_FHstate(psi, sites, links, [1,2,0,0,0], bdim = bdim)
 
-    # Define simulation parameters
-    U = 0.0
+    # Define hamiltonian parameters
+    U = 9.5
     μ = 0.0
+    operator = "Hubbard"
 
-    # iTEBD parameters, gates and operator
+    # Simulation parameters
+    #   iTEBD
     cutoff = 1e-5
     dtau = 0.01
-    steps = 940
+    steps = 2000
+    #   Result analysis
     checkevery = 20
-    framespersecond = 6
-    tolerance = 1e-8
+    framespersecond = 10
+    tolerance = 1e-7
+    mirar_correlacions = false
+    finite = true
+    secondorder = false
 
     mesures = []
     lind = inds(psi[1])[1]
-    #println("PRINCIPI ", inds(psi[1]))
 
     # Generate iTEBD gates
-    secondorder_STgates = gen_gates(sites, dtau)
+    #secondorder_STgates = gen_gates(sites, dtau, "TunnellingUP", U = U, μ = μ, secondorder = false)
+    gatetest = gen_gates(sites, dtau, operator, U = U, μ = μ, secondorder = secondorder, finite=finite)
+    #gatetest = gg_test(sites, dtau, "Tunnelling")
 
     # Prepare iMPS to apply iTEBD
     psi = normalise_unitcell(psi)
@@ -620,16 +693,17 @@ let
     totalupprob = []
     totaldnprob = []
 
+    println(" > Inicia programa")
+
     # Begin iTEBD loop
     for step in 1:steps
-
-        println("Step ", step, " of ", steps)
 
         # Evolve the system using iTEBD, second-order Suzuki-Trotter gate ordering:
         # First (square-rooted) odd gates are applied, then even, then odd gates again
         # The functions gen_gates and secondorder_STstep defined in the file "functions.jl"
         # implement this automatically, generating an array in which the gates are well-ordered
-        psi = ST_step(psi, secondorder_STgates, maxdim = bdim, cutoff=cutoff)
+        psi = ST_step(psi, gatetest, maxdim = bdim, cutoff=cutoff, step = step, secondorder = secondorder, plot_coeffs = mirar_correlacions, finite = finite)
+        #psi = ST_stepTEST(psi, gatetest, maxdim = bdim, cutoff = cutoff, step = step, mcorr = mirar_correlacions)
 
         # Un-loop iMPS
         # psi = unloop_iMPS(psi, links[1])
@@ -642,14 +716,10 @@ let
         # Normalise iMPS
         psi = normalise_unitcell(psi)
 
-        # Re-loop iMPS
-        psi = loop_iMPS(psi)
-
 
         if mod(step, checkevery) == 0
 
-            # Unloop iMPS to compute expectation values
-            psi = unloop_iMPS(psi, links[1])
+            println("Step ", step, " of ", steps)
             
             # Measure density profile
             dens_up = zeros(N)
@@ -659,6 +729,8 @@ let
             tfmatrix = transfermatrix(psi)
             lvec = lateral_env(tfmatrix, tolerance, lind)
             rvec = lateral_env(tfmatrix, tolerance, rind, left = false)
+
+            #println("Producte dels laterals: ")
 
 
             for pos in 1:N
@@ -684,10 +756,10 @@ let
             plot!(dens_dn, ylims=(0,1), legend=false, lc=:blue, linewidth=3) # Ndn
             frame(anim)
 
-            # Re-loop iMPS to continue iTEBD
-            psi = loop_iMPS(psi)
-
         end
+        
+        # Re-loop iMPS
+        psi = loop_iMPS(psi)
 
 
     end
@@ -711,15 +783,23 @@ let
     #savefig("density_1part.png")
 
     # Generate iTEBD animation
-    gif(anim, "1part_evol.gif", fps=framespersecond)
+    prelude = "figures/finite_"*string(finite)*"/N_"*string(N)*"/op_"*operator*"/"
+    fig_id = "U_"*string(U)*"_steps"*string(steps)
+    gif(anim, prelude*"itebdanim"*fig_id*".gif", fps=framespersecond)
 
 
     plot(totalupprob, ylim=(0,3), lc=:red, title="Probabilitat total de trobar la partícula")
     plot!(totaldnprob, ylim=(0,3), lc=:blue, title="Probabilitat total de trobar la partícula")
-    savefig("Prob_uppart.png")
+    savefig(prelude*"Npart"*fig_id*".png")
+
+    if mirar_correlacions
+        gif(anim2, prelude*"Correlacions"*fig_id*".gif", fps=framespersecond*5)
+    end
+
+    println("Hamiltonian: ", operator, " | N = ", N, " | finite = ", finite)
 
     # Generate energy evolution plot
     #plot(energies, yformatter = :scientific, ylimits=(-1e-15, 1e-15))
     #savefig("energy_evol_itebd.png")
-
+ 
 end
