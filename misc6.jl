@@ -126,7 +126,6 @@ for k in 1:mida
     sumatot1 += S[S_Lind=>k, S_Rind=>k]^2
 end
 
-println(sumatot)
 
 S /= sqrt(sumatot1)
 sumatot = 0.0
@@ -141,4 +140,8 @@ S[S_Lind=>1, S_Rind=>1] = 2
 
 Sinv = inv_diagonal(S)
 
-println("Prova1 = ", S * Sinv)
+#println("Prova1 = ", S * Sinv)
+
+replacetags!(S, "caca1", "caca2")
+
+println(inds(S))

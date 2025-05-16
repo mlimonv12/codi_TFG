@@ -329,7 +329,9 @@ function get_operator(name::String, sites::Vector{Index{Int64}}, site::Int64; t 
     elseif name == "GCHubbard"
         operator = get_operator("Tunnelling", sites, site)
         operator += U * op("Nupdn", sites[site]) * op("Id", sites[nextsite])
+        operator += U * op("Id", sites[site]) * op("Nupdn", sites[nextsite])
         operator += -μ * op("Ntot", sites[site]) * op("Id", sites[nextsite])
+        operator += -μ * op("Id", sites[site]) * op("Ntot", sites[nextsite])
     
     else
         error("\n\n No operator identified with the following name: ", name)
@@ -651,7 +653,7 @@ end
 let 
     # 
     N = 2
-    bdim = 16
+    bdim = 8
     sites = siteinds("Electron", N)
     links = [Index(bdim, "link-$i") for i in 0:N]
 
@@ -660,22 +662,22 @@ let
     psi = set_FHstate(psi, sites, links, [1,2,0,0,0], bdim = bdim)
 
     # Define hamiltonian parameters
-    U = 9.5
+    U = -4.0
     μ = 0.0
-    operator = "Hubbard"
+    operator = "GCHubbard"
 
     # Simulation parameters
     #   iTEBD
     cutoff = 1e-5
     dtau = 0.01
-    steps = 2000
+    steps = 1500
     #   Result analysis
-    checkevery = 20
+    checkevery = 30
     framespersecond = 10
     tolerance = 1e-7
     mirar_correlacions = false
-    finite = true
-    secondorder = false
+    finite = false
+    secondorder = true
 
     mesures = []
     lind = inds(psi[1])[1]
@@ -784,7 +786,7 @@ let
 
     # Generate iTEBD animation
     prelude = "figures/finite_"*string(finite)*"/N_"*string(N)*"/op_"*operator*"/"
-    fig_id = "U_"*string(U)*"_steps"*string(steps)
+    fig_id = "U_"*string(U)*"_μ_"*string(μ)*"_steps"*string(steps)
     gif(anim, prelude*"itebdanim"*fig_id*".gif", fps=framespersecond)
 
 

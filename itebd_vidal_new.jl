@@ -184,14 +184,15 @@ function apply_gate(unitcell::Vector{ITensor}, gate::ITensor; odd = true, cutoff
 
 
     # Perform SVD
-    U, S, V = svd(prodsite_matrix, inds(prodsite_matrix)[1]; maxdim = maxdim)
+    U, S, V = svd(prodsite_matrix, inds(prodsite_matrix)[1]; maxdim = maxdim, cutoff = cutoff)
 
     
     # S will be saved as the new central Λ matrix between these two tensors
     # This is where we can normalize the iMPS!
     normalise_diagonal!(S)
-    S_Lind, S_Rind = inds(S)
-    unitcell[mod1(site_ind + 1, 4)] = replaceinds(S, (S_Lind => r1, S_Rind => l2))
+    # S_Lind, S_Rind = inds(S)
+    # Indices are not replaced to allow for variable internal bond dimension
+    unitcell[mod1(site_ind + 1, 4)] = S#replaceinds(S, (S_Lind => r1, S_Rind => l2))
 
 
     # Find the inverse of the Λ matrix that isn't central in this gate operation to remove it from the sides
@@ -210,11 +211,13 @@ function apply_gate(unitcell::Vector{ITensor}, gate::ITensor; odd = true, cutoff
     V *= dag(cright)
 
     U_Lind, U_pind, U_Rind = inds(U)
-    V_Lind, V_pind, V_Rind = inds(V)
+    V_Lind, V_pind, V_Lind = inds(V)
+    println("Inds U: ", inds(U))
+    println("Inds V: ", inds(V))
 
     # Replace automatic SVD indices by defined internal ones, and 
-    replaceinds!(U, (U_Rind => r1, U_Lind => latΛ_Rind)) # Internal bonds have been replaced by SVD bonds, still of χ dimension
-    replaceinds!(V, (V_Lind => l2, V_Rind => latΛ_Lind))
+    replaceind!(U, U_Lind => latΛ_Rind) # Internal bonds have been replaced by SVD bonds, still of χ dimension
+    replaceind!(V, V_Rind => latΛ_Lind)
 
 
     # println("INDS U: ", inds(U))
@@ -233,19 +236,19 @@ end
 
 # Applies a Suzuki-Trotter step to an iMPS, returns the prodsite matrix to spare the contraction
 # for expectation value computation
-function ST_step(unitcell::Vector{ITensor}, gates::Vector{ITensor}; secondorder = true, maxdim = 30, plot_coeffs = true)
+function ST_step(unitcell::Vector{ITensor}, gates::Vector{ITensor}; secondorder = true, maxdim = 30, cutoff = 1e-10, plot_coeffs = true)
 
     ngates = 2
 
     # Odd sites
-    unitcell = apply_gate(unitcell, gates[1], odd = true, maxdim = maxdim)
+    unitcell = apply_gate(unitcell, gates[1], odd = true, maxdim = maxdim, cutoff = cutoff)
     
     # Even sites
-    unitcell = apply_gate(unitcell, gates[2], odd = false, maxdim = maxdim)
+    unitcell = apply_gate(unitcell, gates[2], odd = false, maxdim = maxdim, cutoff = cutoff)
     
     # In second-order ST evolution odd gates are applied again
     if secondorder
-        unitcell = apply_gate(unitcell, gates[1], odd = true, maxdim = maxdim)
+        unitcell = apply_gate(unitcell, gates[1], odd = true, maxdim = maxdim, cutoff = cutoff)
     end
 
     return unitcell
@@ -496,10 +499,11 @@ let
     totalupprob = []
     totaldnprob = []
 
-    #psi = ST_step(psi, gates, maxdim = bdim, secondorder = secondorder)
+    #psi = ST_step(psi, gates, maxdim = bdim, cutoff = cutoff, secondorder = secondorder)
     #psi = normalise_unitcell(psi)
-    #psi = apply_gate(psi, gates[1], odd = false, maxdim = bdim)
+    psi = apply_gate(psi, gates[1], odd = true, maxdim = bdim, cutoff = cutoff)
     #  println(psi[2])
+    psi = normalise_unitcell(psi)
 
 
     op1 = op("Id", sites[1]) * op("Id", sites[2])
