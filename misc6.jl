@@ -133,15 +133,4 @@ sumatot = 0.0
 for k in 1:mida
     sumatot += S[S_Lind=>k, S_Rind=>k]^2
 end
-
-println("Sumatot = ", sumatot)
-
-S[S_Lind=>1, S_Rind=>1] = 2
-
-Sinv = inv_diagonal(S)
-
-#println("Prova1 = ", S * Sinv)
-
-replacetags!(S, "caca1", "caca2")
-
 println(inds(S))
