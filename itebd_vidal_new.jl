@@ -7,31 +7,6 @@ gr()
 anim = Animation()
 anim2 = Animation()
 
-
-
-# Initializes an MPS as a Vector{ITensor}. Allows for iMPS selection
-function init_iMPS2(N::Int64)
-    
-    sites = siteinds("Electron", N)
-    links = [Index(bdim, "link-$i") for i in 0:2*N]
-    psi = [ITensor() for _ in 1:(2*N + 1)]
-
-    for i in 1:2*N
-        if isodd(i) # Γ
-            psi[i] = randomITensor(links[i], sites[i], )
-        else # Λ
-            psi[i] = randomITensor(links[i], links[i+1])
-        end
-    end
-
-    psi[N] = psi[1] # Facillitates operations later on
-
-    return psi, sites, links
-end
-
-
-
-
 # Generates an iMPS ITensor in Vidal form with a given initial state. 1:empty, 2:up, 3:dn, 4:updn
 function init_iMPS(state::Vector; bdim=16)
     
@@ -39,19 +14,20 @@ function init_iMPS(state::Vector; bdim=16)
     
     # Initializes iMPS with two-site unit cell 
     sites = siteinds("Electron", 2)
-    links = [Index(bdim, "link-$i") for i in 0:4]
+    links = [Index(bdim, "link-$i") for i in 1:4]
     psi = [ITensor() for _ in 1:4]
 
     for i in 1:4
         if iseven(i) # Γ
-            T = ITensor(links[i], sites[Int(i/2)], links[i+1])
-            T[links[i]=>1, sites[Int(i/2)]=>references[state[Int(i/2)]], links[i+1]=>1] = 1.0
+            T = ITensor(links[i], sites[Int(i/2)], links[mod1(i+1, 4)])
+            T[links[i]=>1, sites[Int(i/2)]=>references[state[Int(i/2)]], links[mod1(i+1, 4)]=>1] = 1.0
             psi[i] = T
             #psi[i] = randomITensor(links[i], sites[Int(i/2)], links[i+1])
+
         else # Λ
-            psi[i] = ITensor(zeros(bdim, bdim), links[i], links[i+1])
+            psi[i] = ITensor(zeros(bdim, bdim), links[i], links[mod1(i+1, 4)])
             for k in 1:bdim
-                psi[i][links[i]=>k, links[i+1]=>k] = 2.0
+                psi[i][links[i]=>k, links[mod1(i+1, 4)]=>k] = 1.0
             end
         end
     end
@@ -62,12 +38,72 @@ function init_iMPS(state::Vector; bdim=16)
 end
 
 
+# Finds the inverse of a square diagonal two-index tensor
+function inv_diagonal(S::ITensor)
+
+    Sinv = copy(S)
+    s1, s2 = inds(Sinv)
+    values = Int(size(S)[1])
+    
+    for k in 1:values
+        Sinv[s1=>k, s2=>k] = 1 / (S[s1=>k, s2=>k])
+    end
+
+    return Sinv
+end
+
+
+# Contracts over all tensors of an iMPS to prepare for multiple observable computation. Allows to choose central Λ in case of iTEBD
+function contract_full_iMPS(psi::Vector{ITensor}; central = 1, matrix = false)
+
+    unitcell = copy(psi)
+    # New attempt: the link indices are defined in a cyclic way, spares contraction conditions
+
+    # Central == 1 means that the matrix Λ_1 is taken to be the centre of orthogonality of this contraction
+
+    if central == 1     # Λ_2 - Γ_2 - Λ_1 - Γ_1 - Λ_2
+        rightmost_clone = copy(unitcell[3])
+
+        unitcell[3] = prime(unitcell[3], commonind(unitcell[2], unitcell[3])) # Leftmost contraction
+        rightmost_clone = prime(rightmost_clone, commonind(rightmost_clone, unitcell[4]))
+
+        # Output tensor will have internal indices of l2_lamb', r2_lamb'
+
+    else                # Λ_1 - Γ_1 - Λ_2 - Γ_2 - Λ_1
+        rightmost_clone = unitcell[1]
+        
+        unitcell[1] = prime(unitcell[1], commonind(unitcell[1], unitcell[4]))
+        rightmost_clone = prime(rightmost_clone, commonind(rightmost_clone, unitcell[2]))
+
+        # Output tensor will have internal indices of l1_lamb', r1_lamb'
+    end
+ 
+
+    # Contract over all tensors in the unit cell: according to this program's construction this accounts for lateral environment effects
+    # (Λ_2 is duplicate in the unitcell vector, and it suffices to represent the infinite environment in Vidal form)
+    contracted_iMPS = unitcell[1]
+
+    for i in 2:4
+        contracted_iMPS *= unitcell[i]
+    end
+
+    # Finally contract over the lateral clone at the rightmost position
+    contracted_iMPS *= rightmost_clone
+    
+    # Prime both indices of rightmost_clone to facillitate inversion later on
+    #noprime!(rightmost_clone)
+    #prime!(rightmost_clone)
+
+    # Returns a fully internally-contracted iMPS unit cell
+    return contracted_iMPS, rightmost_clone
+end
+
 function normalise_unitcell(unitcell::Vector{ITensor})
 
     bdim = Int(size(unitcell[1])[1])
 
-    unitcell[1] = normalise_diagonal(unitcell[1])*sqrt(bdim)
-    unitcell[3] = normalise_diagonal(unitcell[3])*sqrt(bdim)
+    unitcell[1] = normalise_diagonal(unitcell[1])
+    unitcell[3] = normalise_diagonal(unitcell[3])
     #unitcell[2] /= norm(unitcell[2])
     #unitcell[4] /= norm(unitcell[4])
     # unitcell[5] = unitcell[1]
@@ -75,6 +111,55 @@ function normalise_unitcell(unitcell::Vector{ITensor})
     return unitcell
 end
 
+
+# Normalises a square diagonal two-index tensor
+function normalise_diagonal(S::ITensor)
+
+    mida = Int(size(S)[1])
+    S_Lind, S_Rind = inds(S)
+
+    sumatot = 0.0
+    for k in 1:mida
+        sumatot += S[S_Lind=>k, S_Rind=>k]^2
+    end
+
+    return S / sqrt(sumatot)
+end
+
+# Finds the site index of a Γ tensor
+function find_siteindex(sitetensor::ITensor)
+
+    for index in inds(sitetensor)
+        if hastags(index, "Site")
+            return index
+        end
+    end
+    return
+end
+
+# Converts a prodsite tensor (D,d,d,D) to matrix for SVD
+function tensor_to_matrix(unitcell::Vector{ITensor}, rightmost_clone::ITensor, central::Int64, prodsite::ITensor)
+
+    if central == 1
+        left_internal = prime(commonind(unitcell[2], rightmost_clone)) # Primed, as we have just done
+        left_physical = find_siteindex(unitcell[4])
+        right_internal = prime(commonind(unitcell[3], unitcell[4]))
+        right_physical = find_siteindex(unitcell[2])
+
+        cleft = combiner(left_internal, left_physical)
+        cright = combiner(right_internal, right_physical)
+    else
+        left_internal = prime(commonind(unitcell[4], rightmost_clone)) # Primed, as we have just done
+        left_physical = find_siteindex(unitcell[2])
+        right_internal = prime(commonind(unitcell[1], unitcell[2]))
+        right_physical = find_siteindex(unitcell[4])
+
+        cleft = combiner(left_internal, left_physical)
+        cright = combiner(right_internal, right_physical)
+    end
+
+    return prodsite * cleft * cright, cleft, cright
+end
 
 
 # Generates a vector of Suzuki-Trotter gates for a Hubbard Hamiltonian
@@ -104,133 +189,54 @@ function gen_gates(sites::Vector{Index{Int64}}, dtau::Float64, operator::String;
 end
 
 
-# Normalises a square diagonal two-index tensor
-function normalise_diagonal(S::ITensor)
-
-    mida = Int(size(S)[1])
-    S_Lind, S_Rind = inds(S)
-
-    sumatot = 0.0
-    for k in 1:mida
-        sumatot += S[S_Lind=>k, S_Rind=>k]^2
-    end
-
-    return S / sqrt(sumatot)
-end
-
-
-
-# Finds the inverse of a square diagonal two-index tensor
-function inv_diagonal(S::ITensor)
-
-    Sinv = copy(S)
-    s1, s2 = inds(Sinv)
-    values = Int(size(S)[1])
-    
-    for k in 1:values
-        Sinv[s1=>k, s2=>k] = 1 / (S[s1=>k, s2=>k])
-    end
-
-    return Sinv
-end
-
-
-
 # Applies a two-site gate to an iMPS of type Vector{ITensor}, in Vidal form and with a two-site unit cell, and returns the split iMPS sites
 function apply_gate(unitcell::Vector{ITensor}, gate::ITensor; odd = true, cutoff = 1e-10, maxdim = 30, plot_coeffs = false, step=1)
 
     # Pick one of the two sites to time-evolve
+    odd = true
     if odd
-        site_ind = 2
+        site_ind = 2 # In the odd gate application the sites are contracted together over Λ_2
     else
         site_ind = 4
     end
-    
     nextsite_ind = mod1(site_ind + 2, 4)
 
+    # Contract unit cell onto a single tensor of dimension D,d,d,D
+    prodsite, rightmost_clone = contract_full_iMPS(unitcell, central = mod1(site_ind+1,4), matrix = true)
 
-    # Find physical site indices, for later
-    l1, p1, r1 = inds(unitcell[site_ind])
-    l2, p2, r2 = inds(unitcell[nextsite_ind])
-
-    # Contract over all iMPS where the central Λ is either Λ_2 (odd gate) or Λ_1 (even gate, considering a Λ_1 - Γ_1 ordering)
-    prodsite, lat_clone = contract_full_iMPS(unitcell, central = Int(site_ind/2))
-
-    # Contract the joint site with the two-site operator
+    # Apply Trotter gate to contracted unit cell
     prodsite *= gate
 
-
-    # Define combiner tensors for left and right sides: this will help switch prodsite_evol
-    # from a D,d,d,D indexed tensor to a D*d, D*d tensor, enabling SVD
-    i1, i2, i3, i4 = inds(prodsite)
-
-    # ITensor shenanigans
-    if !odd
-        prodsite = permute(prodsite, i1, i2, i4, i3)
-        i1, i2, i3, i4 = inds(prodsite)
-    end
-
-    #prodsite = permute(prodsite, i1, i3, i2, i4)
-    # println("Inds prodsite: ", inds(prodsite))
-
-    cleft = combiner(i1, i3)
-    cright = combiner(i2, i4)
-    # println("Inds cleft: ", inds(cleft))
-    # println("Inds cright: ", inds(cright))
-
-    # Apply combiners, making prodsite_matrix a D*d, D*d tensor
-    prodsite_matrix = prodsite * cleft
-    prodsite_matrix *= cright
-
+    # Convert product tensor to matrix of dimension D*d, D*d
+    prodsite_matrix, cleft, cright = tensor_to_matrix(A, rightmost_clone, mod1(site_ind+1,4), prova2)
 
     # Perform SVD
-    U, S, V = svd(prodsite_matrix, inds(prodsite_matrix)[1]; maxdim = maxdim, cutoff = cutoff)
+    U, S, V = svd(prodsite_matrix, commonind(prodsite_matrix, cleft), maxdim = bdim, cutoff = cutoff)
 
-    
     # S will be saved as the new central Λ matrix between these two tensors
     # This is where we can normalize the iMPS!
-    normalise_diagonal!(S)
-    # S_Lind, S_Rind = inds(S)
-    # Indices are not replaced to allow for variable internal bond dimension
-    unitcell[mod1(site_ind + 1, 4)] = S#replaceinds(S, (S_Lind => r1, S_Rind => l2))
+    S = normalise_diagonal(S)
 
-
-    # Find the inverse of the Λ matrix that isn't central in this gate operation to remove it from the sides
-    inv_lateral = inv_diagonal(lat_clone)
-    #println("INV LATERAL APPARENTLY: ", lat_clone)
-    inv_lateral = normalise_diagonal(inv_lateral)
-    # println("AQiiiii", norm(inv_lateral - lat_clone))
-    latΛ_Lind, latΛ_Rind = inds(inv_lateral)
-    inv_lateral_left = replaceind(inv_lateral, latΛ_Lind => l1)
-    inv_lateral_right = replaceind(inv_lateral, latΛ_Rind => r2)
-    
-
+    # SVD indices are conserved to allow for variable internal bond dimension
+    unitcell[mod1(site_ind + 1, 4)] = S
 
     # Recover physical/internal bonds
-    U *= dag(cleft) 
+    U *= dag(cleft)
+    noprime!(U)
     V *= dag(cright)
+    noprime!(V)
 
-    U_Lind, U_pind, U_Rind = inds(U)
-    V_Lind, V_pind, V_Lind = inds(V)
-    println("Inds U: ", inds(U))
-    println("Inds V: ", inds(V))
-
-    # Replace automatic SVD indices by defined internal ones, and 
-    replaceind!(U, U_Lind => latΛ_Rind) # Internal bonds have been replaced by SVD bonds, still of χ dimension
-    replaceind!(V, V_Rind => latΛ_Lind)
-
-
-    # println("INDS U: ", inds(U))
-    # println("INDS V: ", inds(V))
-
-    unitcell[site_ind] = noprime(inv_lateral_left * U)
-    unitcell[nextsite_ind] = noprime(V * inv_lateral_right)
+    # Find the inverse of the Λ matrix that isn't central in this gate operation to remove it from the sides
+    # Remove primed indices to enable contraction
+    noprime!(rightmost_clone)
+    inv_lateral = inv_diagonal(rightmost_clone)
+    inv_lateral = normalise_diagonal(inv_lateral)
     
-    # println("INDS LEFT SITE: ", inds(unitcell[site_ind]))
-    # println("INDS RIGHT SITE: ", inds(unitcell[nextsite_ind]))
+    # Update Γ tensors
+    unitcell[site_ind] = U * inv_lateral
+    unitcell[nextsite_ind] = V * inv_lateral
 
     return unitcell
-    
 end
 
 
@@ -310,8 +316,9 @@ function imps_expect_vidal(unitcell::Vector{ITensor}, operator::ITensor; toleran
     # Contract over all tensors in the unit cell: according to this program's construction this accounts for lateral environment effects
     # (Λ_2 is duplicate in the unitcell vector, and it suffices to represent the infinite environment in Vidal form)
     contracted_iMPS, lat_clone = contract_full_iMPS(unitcell, central = 1)
-    # println("contraaaa", inds(contracted_iMPS))
-    leftind, p1, p2, rightind = inds(contracted_iMPS)
+
+    # Remove primed indices
+    noprime!(contracted_iMPS)
 
     # Absorb the operator into the iMPS contracted cells
     # Fill with identities if necessary to make the operator match all physical indices
@@ -321,6 +328,7 @@ function imps_expect_vidal(unitcell::Vector{ITensor}, operator::ITensor; toleran
     observable *= adjoint(contracted_iMPS)
 
     # Finally contract over lateral indices to obtain scalar
+    leftind, rightind = commoninds(observable, contracted_iMPS)
     left_identity = op("Id", leftind)
     right_identity = op("Id", rightind)
 
@@ -330,65 +338,6 @@ function imps_expect_vidal(unitcell::Vector{ITensor}, operator::ITensor; toleran
     # Return observable
     return scalar(observable)
 end
-
-
-
-# Contracts over all tensors of an iMPS to prepare for multiple observable computation. Allows to choose central Λ in case of iTEBD
-function contract_full_iMPS(psi::Vector{ITensor}; central = 1)
-
-    unitcell = copy(psi)
-    
-    # Find indices of all sites, for comfort
-    l1_lamb, r1_lamb = inds(unitcell[1])
-    l1, p1, r1 = inds(unitcell[2])
-    l2_lamb, r2_lamb = inds(unitcell[3])
-    l2, p2, r2 = inds(unitcell[4])
-
-    if central == 1
-        lateral_clone = unitcell[3]
-
-        # Replace indices to allow for different iMPS contraction
-        unitcell[3] = prime(unitcell[3], l2_lamb) # Avoid looping, now \Lambda_2 is the tensor on both sides
-        unitcell[4] = replaceinds(unitcell[4], (r2 => l1_lamb))
-
-        # Output tensor will have internal indices of l2_lamb', r2_lamb
-        # Output lateral_clone will have indices r1, l2_lamb
-    else
-        lateral_clone = unitcell[1]
-        
-        # Prepare the lateral clone to be absorbed through the left
-        lateral_clone = replaceinds(lateral_clone, (l1_lamb => r2))
-        unitcell[1] = prime(unitcell[1], l1_lamb) # For consistency with previous result
-
-        # Output tensor will have internal indices of l1_lamb', r1_lamb
-        # Output lateral_clone will have indices r2, l1_lamb
-    end
- 
-
-    # Contract over all tensors in the unit cell: according to this program's construction this accounts for lateral environment effects
-    # (Λ_2 is duplicate in the unitcell vector, and it suffices to represent the infinite environment in Vidal form)
-
-    # Carefully picking the order of contraction will output a tensor with the most comfortable index ordering
-    # (virtual-physical-physical-virtual)
-    init_contract = mod(central, 2)*2 + 1
-    contracted_iMPS = unitcell[init_contract]
-
-    for i in 1:3
-        nextsite = mod1(init_contract + i, 4)
-        contracted_iMPS *= unitcell[nextsite]
-    end
-
-    # Finally contract over the lateral clone at the rightmost position
-    contracted_iMPS *= lateral_clone
-
-    # println("INDS CONTRACTED HERE !!! ", inds(contracted_iMPS))
-    
-
-    # Returns a fully internally-contracted iMPS unit cell
-    return contracted_iMPS, lateral_clone
-end
-
-
 
 
 
@@ -501,12 +450,13 @@ let
 
     #psi = ST_step(psi, gates, maxdim = bdim, cutoff = cutoff, secondorder = secondorder)
     #psi = normalise_unitcell(psi)
-    psi = apply_gate(psi, gates[1], odd = true, maxdim = bdim, cutoff = cutoff)
+    # psi = apply_gate(psi, gates[1], odd = true, maxdim = bdim, cutoff = cutoff)
     #  println(psi[2])
-    psi = normalise_unitcell(psi)
+    # psi = normalise_unitcell(psi)
 
 
     op1 = op("Id", sites[1]) * op("Id", sites[2])
+    
     prob1 = imps_expect_vidal(psi, op1)
 
 
