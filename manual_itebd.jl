@@ -662,17 +662,17 @@ let
     psi = set_FHstate(psi, sites, links, [1,2,0,0,0], bdim = bdim)
 
     # Define hamiltonian parameters
-    U = -4.0
+    U = 7.0
     μ = 0.0
-    operator = "GCHubbard"
+    operator = "Tunnelling"
 
     # Simulation parameters
     #   iTEBD
     cutoff = 1e-5
     dtau = 0.01
-    steps = 1500
+    steps = 3000
     #   Result analysis
-    checkevery = 30
+    checkevery = 60
     framespersecond = 10
     tolerance = 1e-7
     mirar_correlacions = false
@@ -694,6 +694,8 @@ let
     # probability vector, should be 1 through all iterations for particle number conservation
     totalupprob = []
     totaldnprob = []
+    energies = []
+    op_meas_energy = get_operator("Hubbard", sites, 1)
 
     println(" > Inicia programa")
 
@@ -734,7 +736,6 @@ let
 
             #println("Producte dels laterals: ")
 
-
             for pos in 1:N
                 site_density = op("Nup", sites[pos])
                 dens_down = op("Ndn", sites[pos])
@@ -750,6 +751,8 @@ let
                 dens_dn[pos] = abs(imps_expect_optimal(psi, dens_down, tfmatrix, lvec, rvec))
             end
 
+            meas_energy = abs(imps_expect_optimal(psi, op_meas_energy, tfmatrix, lvec, rvec))
+            push!(energies, meas_energy)
             push!(totalupprob, sum(dens_up))
             push!(totaldnprob, sum(dens_dn))
 
@@ -786,13 +789,18 @@ let
 
     # Generate iTEBD animation
     prelude = "figures/finite_"*string(finite)*"/N_"*string(N)*"/op_"*operator*"/"
-    fig_id = "U_"*string(U)*"_μ_"*string(μ)*"_steps"*string(steps)
+    fig_id = "U_"*string(U)*"_μ_"*string(μ)*"_dt_"*string(dtau)*"_steps"*string(steps)
     gif(anim, prelude*"itebdanim"*fig_id*".gif", fps=framespersecond)
 
 
-    plot(totalupprob, ylim=(0,3), lc=:red, title="Probabilitat total de trobar la partícula")
-    plot!(totaldnprob, ylim=(0,3), lc=:blue, title="Probabilitat total de trobar la partícula")
+    plot(totalupprob, ylim=(0,3), lc=:red, title="Nombre de partícules")
+    plot!(totaldnprob, ylim=(0,3), lc=:blue, title="Nombre de partícules")
     savefig(prelude*"Npart"*fig_id*".png")
+
+
+    plot(energies, lc=:blue, title="Energia")
+    savefig(prelude*"Energy"*fig_id*".png")
+
 
     if mirar_correlacions
         gif(anim2, prelude*"Correlacions"*fig_id*".gif", fps=framespersecond*5)
