@@ -1,6 +1,6 @@
 # iTEBD evolution using vidal notation for the unit cell
 using ITensors, ITensorMPS
-using Plots
+using Plots, Statistics
 gr()
 
 #include("functions.jl")
@@ -105,10 +105,10 @@ function normalise_unitcell(unitcell::Vector{ITensor}; bdim = 16)
     #unitcell[3] = normalise_diagonal(unitcell[3])
     unitcell[1] /= norm(unitcell[1])
     unitcell[3] /= norm(unitcell[3])
-    #unitcell[2] /= norm(unitcell[2])
-    #unitcell[4] /= norm(unitcell[4])
+    unitcell[2] /= norm(unitcell[2])
+    unitcell[4] /= norm(unitcell[4])
     # unitcell[5] = unitcell[1]
-    factor = 4*sqrt(2)*2^(1/6)#2#^(5/6)*2^(1/6)
+    factor = 4.472135954999579#*sqrt(2)*2^(1/6)#2#^(5/6)*2^(1/6)
     unitcell[1] *= factor
     unitcell[3] *= factor
 
@@ -191,7 +191,7 @@ function gen_gates(sites::Vector{Index{Int64}}, dtau::Float64, operator::String;
     
     for i in 1:2
 
-        h = get_operator(operator, sites, i; U = U, μ = μ, V = V)
+        h = get_operator(operator, sites, 1; U = U, μ = μ, V = V)
 
         # Second-order ST ordering: dτ is divided by two for odd gates, which will be applied twice
         if secondorder
@@ -299,55 +299,59 @@ function get_operator(name::String, sites::Vector{Index{Int64}}, site::Int64; t 
 
     N = 2
     nextsite = mod1(site + 1, N) # Index of next site
+    ampo = OpSum()
 
     if name == "TunnellingUP"
-        operator = op("Cdagup", sites[site]) * op("Cup", sites[nextsite])
-        operator += op("Cup", sites[site]) * op("Cdagup", sites[nextsite])
-        operator *= -t
+        ampo = op("Cdagup", sites[site]) * op("Cup", sites[nextsite])
+        ampo += op("Cup", sites[site]) * op("Cdagup", sites[nextsite])
+        ampo *= -t
 
     elseif name == "TunnellingDOWN"
-        operator = op("Cdagdn", sites[site]) * op("Cdn", sites[nextsite])
-        operator += op("Cdn", sites[site]) * op("Cdagdn", sites[nextsite])
-        operator *= -t
+        ampo = op("Cdagdn", sites[site]) * op("Cdn", sites[nextsite])
+        ampo += op("Cdn", sites[site]) * op("Cdagdn", sites[nextsite])
+        ampo *= -t
 
     elseif name == "Tunnelling"
-        operator = -t * op("Cdagup", sites[site]) * op("Cup", sites[nextsite])
-        operator += -t * op("Cup", sites[site]) * op("Cdagup", sites[nextsite])
-        operator += -t * op("Cdagdn", sites[site]) * op("Cdn", sites[nextsite])
-        operator += -t * op("Cdn", sites[site]) * op("Cdagdn", sites[nextsite])
-        #operator *= -t
+        ampo += -t, "Cdagup", site, "Cup", nextsite
+        ampo += -t, "Cdagup", nextsite, "Cup", site
+        ampo += -t, "Cdagdn", site, "Cdn", nextsite
+        ampo += -t, "Cdagdn", nextsite, "Cdn", site
     
     elseif name == "Onsite"
-        operator = U * op("Nupdn", sites[site]) * op("Id", sites[nextsite])
+        ampo = U * op("Nupdn", sites[site]) * op("Id", sites[nextsite])
 
     elseif name == "ChemPot"
-        operator = -μ * op("Ntot", sites[site]) * op("Id", sites[nextsite])
+        ampo = -μ * op("Ntot", sites[site]) * op("Id", sites[nextsite])
     
     elseif name == "Hubbard"
-        operator = get_operator("Tunnelling", sites, site)
-        #operator2 = U * op("Nupdn", sites[site])
-        operator += U * op("Nupdn", sites[site]) * op("Id", sites[nextsite])
-        operator += U * op("Id", sites[site]) * op("Nupdn", sites[nextsite])
+        ampo += -t, "Cdagup", site, "Cup", nextsite
+        ampo += -t, "Cdagup", nextsite, "Cup", site
+        ampo += -t, "Cdagdn", site, "Cdn", nextsite
+        ampo += -t, "Cdagdn", nextsite, "Cdn", site
+        ampo += U, "Nupdn", site, "Id", nextsite
+        ampo += U, "Nupdn", nextsite, "Id", site
     
     elseif name == "GCHubbard"
-        operator = get_operator("Tunnelling", sites, site)
-        operator += U * op("Nupdn", sites[site]) * op("Id", sites[nextsite])
-        operator += U * op("Id", sites[site]) * op("Nupdn", sites[nextsite])
-        operator += -μ * op("Ntot", sites[site]) * op("Id", sites[nextsite])
-        operator += -μ * op("Id", sites[site]) * op("Ntot", sites[nextsite])
+        ampo = get_operator("Tunnelling", sites, site)
+        ampo += U * op("Nupdn", sites[site]) * op("Id", sites[nextsite])
+        ampo += U * op("Id", sites[site]) * op("Nupdn", sites[nextsite])
+        ampo += -μ * op("Ntot", sites[site]) * op("Id", sites[nextsite])
+        ampo += -μ * op("Id", sites[site]) * op("Ntot", sites[nextsite])
     
     elseif name == "ExtHubbard"
-        operator = get_operator("Tunnelling", sites, site)
-        operator += U * op("Nupdn", sites[site]) * op("Id", sites[nextsite])
-        operator += U * op("Id", sites[site]) * op("Nupdn", sites[nextsite])
-        operator += V * op("Ntot", sites[site]) * op("Ntot", sites[nextsite])
+        ampo = get_operator("Tunnelling", sites, site)
+        ampo += U * op("Nupdn", sites[site]) * op("Id", sites[nextsite])
+        ampo += U * op("Id", sites[site]) * op("Nupdn", sites[nextsite])
+        ampo += V * op("Ntot", sites[site]) * op("Ntot", sites[nextsite])
     
     else
         error("\n\n No operator identified with the following name: ", name)
         #throw(InterruptException())
     end
 
-    return operator
+    operator = MPO(ampo, sites)
+
+    return operator[1] * operator[2]
 end
 
 
@@ -410,32 +414,6 @@ end
 
 
 
-function loop_iMPS(unitcell::Vector{ITensor})
-
-    N = length(unitcell)
-
-    # Get lateral indices
-    l1, p1, r1 = inds(unitcell[1])
-    ln, pn, rn = inds(unitcell[N])
-
-    replaceinds!(unitcell[1], (l1 => rn))
-
-    return unitcell
-end
-
-
-function unloop_iMPS(unitcell::Vector{ITensor}, leftindex::Index{Int64})
-
-    # Get first cell indices
-    rn, p1, r1 = inds(unitcell[1])
-
-    replaceinds!(unitcell[1], (rn => leftindex))
-
-    return unitcell
-end
-
-
-
 # Computes the Von Neumann entropy of an iMPS at a given site
 function site_entropy(iMPS::Vector{ITensor}, site::Int64)
 
@@ -450,33 +428,71 @@ end
 
 
 
+function make_hamiltonian_gate(sites, j, t, U, V, dt; secondorder = false)
+
+    N = 2
+
+    ampo = AutoMPO()
+    # Tunnelling terms
+    ampo += -t, "Cdagup", 1, "Cup", 2
+    ampo += -t, "Cdagup", 2, "Cup", 1
+    ampo += -t, "Cdagdn", 1, "Cdn", 2
+    ampo += -t, "Cdagdn", 2, "Cdn", 1
+    
+    # NN interaction
+    ampo += V, "Ntot", 1, "Ntot", 2
+
+    # On-site interaction
+    ampo += U, "Nupdn", 1
+
+    ampo += U, "Nupdn", 2
+        
+    Hj = MPO(ampo, [sites[j],sites[mod1(j+1, 2)]])
+    Hj_comb = Hj[1] * Hj[2]
+
+    # Time evolution operator
+    if (isodd(j) && secondorder)
+        expHj = exp(- dt/2 * Hj_comb)
+    else
+        expHj = exp(- dt * Hj_comb)
+    end
+
+    return Hj, expHj
+end
+
+
+
+
+
+
+
 
 let 
     # N=2
-    bdim = 16
+    bdim = 20
     println("Bond dimension: ", bdim)
 
     # Create an iMPS with a known initial state
-    psi, sites, links = init_iMPS([1,0], bdim = bdim)
+    psi, sites, links = init_iMPS([1,2], bdim = bdim)
 
     # Define hamiltonian parameters
-    U = 10.0
+    t = 1.0
+    U = 4.0
     μ = 0.0
-    V = 5.0
+    V = 0.0
     operator = "Hubbard"
 
     # Simulation parameters
     #   iTEBD
-    cutoff = 1e-10
+    cutoff = 1e-8
     dtau = 0.01
-    steps = 1500
+    steps = 100
     #   Result analysis
-    checkevery = 50
+    checkevery = 100
     framespersecond = 10
-    tolerance = 1e-7
     mirar_correlacions = false
     finite = false
-    secondorder = true
+    secondorder = false
     savedata = true
 
     mesures = []
@@ -484,7 +500,18 @@ let
     #println(psi[1])
 
     # Generate iTEBD gates
-    gates = gen_gates(sites, dtau, operator, U = U, μ = μ, V = V, secondorder = secondorder)
+    # Make hamiltonian & TEBD gates
+    H_ops = [ITensor() for _ in 1:2]
+    gates = [ITensor() for _ in 1:2]
+    Hdef = ITensor()
+
+    for j in 1:2
+        Hj, gate = make_hamiltonian_gate(sites, j, t, U, V, dtau)
+        gates[j] = gate
+        if j == 1
+            Hdef = Hj[1] * Hj[2]
+        end
+    end
     
 
     # Prepare iMPS to apply iTEBD
@@ -493,6 +520,7 @@ let
     # probability vector, should be 1 through all iterations for particle number conservation
     totalupprob = []
     totaldnprob = []
+    totalprob =[]
 
     # psi = apply_gate(psi, gates[1], odd = true, maxdim = bdim, cutoff = cutoff)
     #  println(psi[2])
@@ -534,39 +562,45 @@ let
             # Measure density profile
             dens_up = zeros(2)
             dens_dn = zeros(2)
+            dens_tot = zeros(2)
             
             contracted_iMPS, lateral_clone = contract_full_iMPS(psi, central = 2)
 
-            energy = imps_expect_vidal_optimal(contracted_iMPS, op_meas_energy)
+            energy = imps_expect_vidal_optimal(contracted_iMPS, Hdef)
 
 
             for pos in 1:2
                 # Contract over all sites to compute observable
                 op_dens_up = op("Nup", sites[pos])
                 op_dens_down = op("Ndn", sites[pos])
+                op_dens_tot = op("Nupdn", sites[pos])
 
                 othersite = mod1(pos + 1, 2)
                 op_dens_up *= op("Id", sites[othersite])
                 op_dens_down *= op("Id", sites[othersite])
+                op_dens_tot *= op("Id", sites[othersite])
 
                 # Find expected values
                 dens_up[pos] = imps_expect_vidal_optimal(contracted_iMPS, op_dens_up)
                 dens_dn[pos] = imps_expect_vidal_optimal(contracted_iMPS, op_dens_down)
+                dens_tot[pos] = imps_expect_vidal_optimal(contracted_iMPS, op_dens_tot)
             end
 
             push!(energies, energy)
             push!(totalupprob, sum(dens_up))
             push!(totaldnprob, sum(dens_dn))
+            push!(totalprob, sum(dens_tot))
+            println("VALOR: ", mean(dens_tot), " ± ", std(dens_tot))
 
             plot(dens_up, ylims=(0,1), legend=false, title="* Iteració = $step", lc=:red, linewidth=3) # Nup
             plot!(dens_dn, ylims=(0,1), legend=false, lc=:blue, linewidth=3) # Ndn
+            plot!(dens_tot, ylims=(0,1), legend=false, lc=:green, linewidth=3) # Nupdn
             frame(anim)
 
         end
 
 
     end
-
 
 
 
